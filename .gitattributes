@@ -1,0 +1,4 @@
+# LF line endings in the working tree on every OS: builds and shell scripts
+# run inside a Linux container, and tools/ws-pull runs on a Linux desktop.
+# Binary files are detected automatically by text=auto.
+* text=auto eol=lf
