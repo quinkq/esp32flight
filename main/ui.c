@@ -142,6 +142,20 @@ static bool view_shows_ships(void);
 #define VIEW_STATS  3
 #define VIEW_RETRO  4
 #define VIEW_COUNT  5
+/* view menu icons, one per VIEW_* (the glyphs the old cycle button used) */
+static const char *const k_view_icon[VIEW_COUNT] = {
+    LV_SYMBOL_LIST, LV_SYMBOL_LOOP, LV_SYMBOL_GPS, LV_SYMBOL_BARS, LV_SYMBOL_EYE_OPEN,
+};
+_Static_assert(sizeof(((lang_t *)0)->view_names) / sizeof(((lang_t *)0)->view_names[0]) == VIEW_COUNT,
+               "lang_t.view_names must name every view");
+/* Header geometry in design px (UISX), right to left: gear, view menu
+ * button, status line. Left to right: clock, weather text, which gets the
+ * rest. The view button is wider on the big panels. */
+#define HDR_GEAR_W   46
+#define HDR_VIEW_W   (SCR_W > 800 ? 240 : 150)
+#define HDR_VIEW_R   (10 + HDR_GEAR_W + 8)                 /* button's right edge from the screen edge */
+#define HDR_STATUS_W 230
+#define HDR_STATUS_R (HDR_VIEW_R + HDR_VIEW_W + 10)
 /* The ambient map composes in the 800x480 design space and is zoomed by
  * LVGL on larger panels: full-resolution compose buffers (2x 1.2 MB on
  * the 7B) plus the LVGL framebuffers simply do not coexist in a 6.4 MB
@@ -246,9 +260,13 @@ static lv_obj_t *s_sv_metar;
 static lv_obj_t *s_sv_days;
 static app_stats_t s_stats_snap;
 static lv_obj_t *s_mb_logo, *s_mb_callsign, *s_mb_type, *s_mb_route, *s_mb_stats, *s_mb_bar;
-static lv_obj_t *s_mode_btn_label;
+static lv_obj_t *s_view_btn_label;   /* header view button: current view's icon + name */
 static lv_obj_t *s_clock_label;
 static lv_obj_t *s_gear_label;
+static lv_obj_t *s_view_menu;        /* tap-outside scrim holding the open view menu */
+static void view_btn_update(void);
+static void view_menu_close(void);
+static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, lv_color_t color);
 
 /* Radar view */
 static lv_obj_t *s_radar_panel;
@@ -665,19 +683,16 @@ static void apply_view(int mode)
     switch (s_view_mode) {
     case VIEW_MAP:
         lv_obj_clear_flag(s_map_panel, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_mode_btn_label, LV_SYMBOL_GPS);   /* next: radar */
         lv_timer_resume(s_cycle_timer);
         lv_timer_reset(s_cycle_timer);
         break;
     case VIEW_RADAR:
         lv_obj_clear_flag(s_radar_panel, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_mode_btn_label, LV_SYMBOL_BARS);  /* next: stats */
         lv_timer_resume(s_cycle_timer);
         lv_timer_reset(s_cycle_timer);
         break;
     case VIEW_STATS:
         lv_obj_clear_flag(s_stats_panel, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_mode_btn_label, LV_SYMBOL_EYE_OPEN);  /* next: retro */
         lv_timer_pause(s_cycle_timer);
         break;
     case VIEW_RETRO:
@@ -685,21 +700,97 @@ static void apply_view(int mode)
         if (s_retro_timer != NULL) {
             lv_timer_resume(s_retro_timer);
         }
-        lv_label_set_text(s_mode_btn_label, LV_SYMBOL_LIST);  /* next: detail */
         lv_timer_pause(s_cycle_timer);
         break;
     default:
         lv_obj_clear_flag(s_detail_panel, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_mode_btn_label, LV_SYMBOL_LOOP);  /* next: auto map */
         lv_timer_pause(s_cycle_timer);
         break;
     }
+    view_menu_close();   /* changed from elsewhere (input action) while open */
+    view_btn_update();
     render_right();
 }
 
-static void mode_click_cb(lv_event_t *e)
+/* ---- view menu: the header button opens a list of all views ---- */
+
+static void view_btn_update(void)
 {
-    apply_view(s_view_mode + 1);
+    if (s_view_btn_label != NULL) {
+        lv_label_set_text_fmt(s_view_btn_label, "%s  %s",
+                              k_view_icon[s_view_mode], L()->view_names[s_view_mode]);
+    }
+}
+
+static void view_menu_close(void)
+{
+    if (s_view_menu != NULL) {
+        /* async: this also runs from the menu's own click handlers */
+        lv_obj_del_async(s_view_menu);
+        s_view_menu = NULL;
+    }
+}
+
+static void view_menu_scrim_cb(lv_event_t *e)
+{
+    view_menu_close();   /* tap outside the menu */
+}
+
+static void view_menu_item_cb(lv_event_t *e)
+{
+    apply_view((int)(intptr_t)lv_event_get_user_data(e));   /* closes the menu */
+}
+
+static void view_menu_open(void)
+{
+    /* transparent full-screen scrim on the top layer: a tap anywhere
+       outside the list closes it */
+    s_view_menu = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_view_menu);
+    lv_obj_set_size(s_view_menu, SCR_W, SCR_H);
+    lv_obj_add_flag(s_view_menu, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_view_menu, view_menu_scrim_cb, LV_EVENT_CLICKED, NULL);
+
+    /* the list hangs under the header button, same width, right-aligned */
+    const lv_coord_t row_h = UISY(48), pad = UISY(4);
+    lv_obj_t *list = lv_obj_create(s_view_menu);
+    lv_obj_set_size(list, UISX(HDR_VIEW_W), VIEW_COUNT * row_h + 2 * pad);
+    lv_obj_set_pos(list, SCR_W - UISX(HDR_VIEW_R) - UISX(HDR_VIEW_W), HEADER_H + UISY(2));
+    lv_obj_set_style_bg_color(list, COL_PANEL, 0);
+    lv_obj_set_style_border_color(list, COL_ROW, 0);
+    lv_obj_set_style_border_width(list, 1, 0);
+    lv_obj_set_style_radius(list, UISY(8), 0);
+    lv_obj_set_style_shadow_width(list, 16, 0);
+    lv_obj_set_style_shadow_opa(list, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(list, pad, 0);
+    lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int v = 0; v < VIEW_COUNT; v++) {
+        bool cur = v == s_view_mode;
+        lv_obj_t *item = lv_btn_create(list);
+        lv_obj_set_size(item, lv_pct(100), row_h);
+        lv_obj_set_pos(item, 0, v * row_h);
+        lv_obj_set_style_bg_color(item, COL_ROW, 0);
+        lv_obj_set_style_bg_opa(item, cur ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_opa(item, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_set_style_shadow_width(item, 0, 0);
+        lv_obj_set_style_radius(item, UISY(6), 0);
+        lv_obj_set_style_pad_hor(item, UISX(10), 0);
+        lv_obj_add_event_cb(item, view_menu_item_cb, LV_EVENT_CLICKED, (void *)(intptr_t)v);
+        lv_obj_t *l = make_label(item, UIFONT(&font_pl_16, &font_pl_10),
+                                 cur ? COL_ACCENT : COL_TEXT);
+        lv_label_set_text_fmt(l, "%s  %s", k_view_icon[v], L()->view_names[v]);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+    }
+}
+
+static void view_btn_cb(lv_event_t *e)
+{
+    if (s_view_menu != NULL) {
+        view_menu_close();
+    } else {
+        view_menu_open();
+    }
 }
 
 void ui_set_list_mode(int mode)
@@ -824,27 +915,43 @@ static void build_header(lv_obj_t *scr)
     lv_obj_set_size(hdr, SCR_W, HEADER_H);
     lv_obj_set_pos(hdr, 0, 0);
 
-    s_weather_label = make_label(hdr, UIFONT(&font_pl_20, &font_pl_12), COL_ACCENT);
-    lv_obj_set_width(s_weather_label, UISX(340));
-    lv_label_set_long_mode(s_weather_label, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_weather_label, LV_SYMBOL_GPS " esp32flight");
-    lv_obj_align(s_weather_label, LV_ALIGN_LEFT_MID, UISX(14), 0);
-
-    s_clock_label = make_label(hdr, UIFONT(&font_pl_20, &font_pl_12), COL_TEXT);
-    /* dead center: offset +60 collided with the status label on busy
-     * headers (#33, clock painted over the city name) */
-    lv_obj_align(s_clock_label, LV_ALIGN_CENTER, 0, 0);
+    /* Clock at the far left. Its box fits the widest time the chosen
+     * format can show, so the weather text never shifts with the minutes.
+     * (It was centered after an offset clock painted over the status line,
+     * #33; the wide view button leaves no room in the middle.) Every
+     * element aligns to the header, not to a neighbour, so the status
+     * line's bigger alert font stays vertically centered. */
+    const lv_font_t *clk_font = UIFONT(&font_pl_20, &font_pl_12);
+    lv_point_t csz;
+    lv_txt_get_size(&csz, settings_get()->clock_12h ? "88:88 PM" : "88:88", clk_font,
+                    0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_coord_t clk_w = csz.x + UISX(4);
+    s_clock_label = make_label(hdr, clk_font, COL_TEXT);
+    lv_obj_set_width(s_clock_label, clk_w);
+    lv_obj_align(s_clock_label, LV_ALIGN_LEFT_MID, UISX(14), 0);
     lv_label_set_text(s_clock_label, "");
 
+    /* weather text: whatever is left between the clock and the status line */
+    lv_coord_t wx_x = UISX(14) + clk_w + UISX(14);
+    lv_coord_t wx_w = SCR_W - UISX(HDR_STATUS_R + HDR_STATUS_W + 12) - wx_x;
+    if (wx_w < UISX(60)) {
+        wx_w = UISX(60);
+    }
+    s_weather_label = make_label(hdr, UIFONT(&font_pl_20, &font_pl_12), COL_ACCENT);
+    lv_obj_set_width(s_weather_label, wx_w);
+    lv_label_set_long_mode(s_weather_label, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_weather_label, LV_SYMBOL_GPS " esp32flight");
+    lv_obj_align(s_weather_label, LV_ALIGN_LEFT_MID, wx_x, 0);
+
     s_status_label = make_label(hdr, UIFONT(&font_pl_14, &font_pl_8), COL_DIM);
-    lv_obj_set_width(s_status_label, UISX(230));
+    lv_obj_set_width(s_status_label, UISX(HDR_STATUS_W));
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(s_status_label, LV_ALIGN_RIGHT_MID, -UISX(122), 0);
+    lv_obj_align(s_status_label, LV_ALIGN_RIGHT_MID, -UISX(HDR_STATUS_R), 0);
     lv_label_set_text(s_status_label, "...");
 
     lv_obj_t *gear = lv_btn_create(hdr);
-    lv_obj_set_size(gear, UISX(46), UISY(36));
+    lv_obj_set_size(gear, UISX(HDR_GEAR_W), UISY(36));
     lv_obj_align(gear, LV_ALIGN_RIGHT_MID, -UISX(10), 0);
     lv_obj_set_style_bg_color(gear, COL_ROW, 0);
     lv_obj_add_event_cb(gear, settings_click_cb, LV_EVENT_CLICKED, NULL);
@@ -852,14 +959,21 @@ static void build_header(lv_obj_t *scr)
     lv_label_set_text(s_gear_label, LV_SYMBOL_SETTINGS);
     lv_obj_center(s_gear_label);
 
-    lv_obj_t *mode = lv_btn_create(hdr);
-    lv_obj_set_size(mode, UISX(46), UISY(36));
-    lv_obj_align(mode, LV_ALIGN_RIGHT_MID, -UISX(62), 0);
-    lv_obj_set_style_bg_color(mode, COL_ROW, 0);
-    lv_obj_add_event_cb(mode, mode_click_cb, LV_EVENT_CLICKED, NULL);
-    s_mode_btn_label = make_label(mode, UIFONT(&lv_font_montserrat_16, &lv_font_montserrat_10), COL_TEXT);
-    lv_label_set_text(s_mode_btn_label, LV_SYMBOL_LOOP);
-    lv_obj_center(s_mode_btn_label);
+    /* view menu button: the current view's icon and name; tap for the list */
+    lv_obj_t *vbtn = lv_btn_create(hdr);
+    lv_obj_set_size(vbtn, UISX(HDR_VIEW_W), UISY(36));
+    lv_obj_align(vbtn, LV_ALIGN_RIGHT_MID, -UISX(HDR_VIEW_R), 0);
+    lv_obj_set_style_bg_color(vbtn, COL_ROW, 0);
+    lv_obj_set_style_pad_hor(vbtn, UISX(10), 0);
+    lv_obj_add_event_cb(vbtn, view_btn_cb, LV_EVENT_CLICKED, NULL);
+    s_view_btn_label = make_label(vbtn, UIFONT(&font_pl_16, &font_pl_10), COL_TEXT);
+    lv_obj_set_width(s_view_btn_label, UISX(HDR_VIEW_W - 20 - 24));
+    lv_label_set_long_mode(s_view_btn_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_view_btn_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *caret = make_label(vbtn, UIFONT(&font_pl_16, &font_pl_10), COL_DIM);
+    lv_label_set_text(caret, LV_SYMBOL_DOWN);
+    lv_obj_align(caret, LV_ALIGN_RIGHT_MID, 0, 0);
+    view_btn_update();
 }
 
 static void build_list(lv_obj_t *scr)
@@ -4390,7 +4504,7 @@ void ui_toast(const char *text)
 bool ui_input_action(const char *a)
 {
     if (strcmp(a, "next_view") == 0 || strcmp(a, "prev_view") == 0) {
-        int v = (s_view_mode + (a[0] == 'n' ? 1 : 4)) % 5;
+        int v = (s_view_mode + (a[0] == 'n' ? 1 : VIEW_COUNT - 1)) % VIEW_COUNT;
         apply_view(v);
         return true;
     }

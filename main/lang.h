@@ -69,6 +69,8 @@ typedef struct {
     const char *apt_mode_opts;   /* dropdown: show only / hide */
     const char *arr_fmt;         /* local arrival time, %s = HH:MM */
     const char *avg_word, *best_word;
+    /* view menu, in ui.c VIEW_* order */
+    const char *view_names[5];
     /* stats view */
     const char *stats_title;
     const char *st_hourly;
