@@ -218,6 +218,7 @@ static bool s_amb_view_ok;
 static int  s_amb_missing;   /* tiles absent from the current ambient render */
 static lv_obj_t *s_amb_note;  /* first-entry loading-map hint */
 static volatile bool s_amb_busy;
+static bool s_amb_canvas_held;   /* lent to the full-screen route map */
 static char s_amb_key[48];
 static double s_amb_bbox[4];
 static int64_t s_amb_last_try;
@@ -990,12 +991,37 @@ static void project_emb(double lat, double lon, lv_coord_t *x, lv_coord_t *y)
  * tilemap mutex, so one borrow at a time is guaranteed. */
 static uint16_t *amb_canvas_borrow(void)
 {
-    if (s_amb != NULL || s_amb_tiles == NULL) {
-        return NULL;   /* screensaver on screen (or no canvas): not lendable */
+    if (s_amb != NULL || s_amb_tiles == NULL || s_amb_canvas_held) {
+        return NULL;   /* on screen (screensaver or route map) or no canvas */
     }
     s_amb_view_ok = false;   /* kept frame is about to be scribbled over */
     s_amb_key[0] = '\0';
     return s_amb_tiles;
+}
+
+/* Longer-term loan of the same canvas to the full-screen route map, which
+ * displays straight from it while open: a per-open 1 MB allocation there
+ * failed on the 7B's fragmented PSRAM and left the map blank. While held,
+ * the borrowers above compose in place and the screensaver doesn't render
+ * (amb_show closes the route map first). LVGL context only. */
+uint16_t *ui_amb_canvas_hold(int *w, int *h)
+{
+    if (s_amb != NULL || s_amb_tiles == NULL || s_amb_canvas_held) {
+        return NULL;
+    }
+    s_amb_canvas_held = true;
+    s_amb_view_ok = false;   /* kept frame is about to be overwritten */
+    s_amb_key[0] = '\0';
+    *w = AMB_RENDER_W;
+    *h = AMB_RENDER_H;
+    return s_amb_tiles;
+}
+
+/* A route-map render still running on the tile worker finishes before the
+ * next borrower's job starts: jobs run one at a time. */
+void ui_amb_canvas_release(void)
+{
+    s_amb_canvas_held = false;
 }
 
 static void emb_tiles_job(void)
@@ -2301,9 +2327,18 @@ static void amb_tiles_job(void)
      * on same-area re-renders (tilemap TM_NO_FLOOD) means a visible retry
      * morphs into the fresh frame instead of flashing dark. */
     uint16_t *scratch = s_amb_tiles;
+    bool lent = false;
     if (lvgl_port_lock(1000)) {
-        s_amb_view_ok = false;   /* canvas is being rewritten */
+        lent = s_amb_canvas_held;   /* queued before the route map took it */
+        if (!lent) {
+            s_amb_view_ok = false;   /* canvas is being rewritten */
+        }
         lvgl_port_unlock();
+    }
+    if (lent) {
+        ESP_LOGI("ui", "ambient tiles: skipped, canvas lent to the route map");
+        s_amb_busy = false;
+        return;
     }
     tile_view_t view;
     bool ok = scratch != NULL &&
@@ -2338,6 +2373,7 @@ static void amb_tiles_job(void)
 
         if (lvgl_port_lock(-1)) {
         ok = ok && s_amb_tiles != NULL;   /* boot-allocated */
+        ok = ok && !s_amb_canvas_held;    /* lent mid-render: frame is stale */
         if (ok) {
             s_amb_view = view;
             s_amb_view_ok = true;
@@ -2413,7 +2449,7 @@ static void amb_proj(double lat, double lon, lv_coord_t *x, lv_coord_t *y)
 
 static void amb_spawn_tiles(void)
 {
-    if (!s_home_ok || s_amb_busy) {
+    if (!s_home_ok || s_amb_busy || s_amb_canvas_held) {
         return;
     }
     int radius_nm = settings_get()->radius_nm;
@@ -2713,6 +2749,9 @@ static void amb_show(void)
 {
     if (s_amb != NULL) {
         return;
+    }
+    if (s_amb_canvas_held) {
+        ui_map_close();   /* hands the screensaver its canvas back */
     }
     s_amb_retro = settings_get()->amb_style == 1 && s_retro_panel != NULL;
     if (s_amb_retro) {

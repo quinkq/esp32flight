@@ -20,9 +20,13 @@
 #include "trails.h"
 
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "extra/libs/png/lodepng.h"
 
 #include "theme.h"
+#include "ui.h"
+
+static const char *TAG = "ui_map";
 
 LV_IMG_DECLARE(img_plane);
 LV_IMG_DECLARE(img_heli);
@@ -50,6 +54,10 @@ LV_IMG_DECLARE(img_drone);
 #define WORLD_W    800
 #define WORLD_H    400
 #define PATH_PTS   33
+/* Tiles compose in at most the 800-wide design space; LVGL zooms the
+ * bitmap up on larger panels (text and markers stay native-crisp), as the
+ * other map views do. Identity on 800x480. */
+#define ROUTE_RENDER_MAX_W 800
 
 static lv_obj_t *s_overlay;
 static lv_point_t s_path[PATH_PTS];
@@ -62,8 +70,12 @@ static aircraft_t   s_ac;
 static route_info_t s_rt;
 static bool         s_have_route;
 
-/* Tile view for the full-screen map */
-static uint16_t     *s_tiles;
+/* Tile view for the full-screen map. The canvas is normally the
+ * screensaver's, lent for as long as the overlay is open; an own buffer
+ * only when that's unavailable. */
+static uint16_t     *s_canvas;
+static bool          s_canvas_lent;
+static int           s_rw, s_rh;    /* render size (s_rw <= MAP_W) */
 static lv_img_dsc_t  s_tiles_dsc;
 static tile_view_t   s_view;
 static bool          s_view_ok;
@@ -76,22 +88,34 @@ static double s_pan_dlat, s_pan_dlon;
 static double s_base_clat, s_base_clon;   /* route-box center before pan */
 static double s_half_lat, s_half_lon;   /* current view half-spans */
 
-static void close_cb(lv_event_t *e)
+void ui_map_close(void)
 {
     if (s_overlay != NULL) {
         lv_obj_del(s_overlay);
         s_overlay = NULL;
         s_generation++;
-        /* give the 768 KB tile canvas back unless a worker still paints */
-        if (!s_tiles_busy && s_tiles != NULL) {
-            free(s_tiles);
-            s_tiles = NULL;
+        if (s_canvas_lent) {
+            /* safe even mid-render: tile jobs run one at a time, so the
+               next user of the canvas starts after this render ends */
+            ui_amb_canvas_release();
+            s_canvas_lent = false;
+            s_canvas = NULL;
+            s_view_ok = false;
+        } else if (!s_tiles_busy && s_canvas != NULL) {
+            /* own canvas: give it back unless a worker still paints */
+            free(s_canvas);
+            s_canvas = NULL;
             s_view_ok = false;
         }
         /* and the ~1 MB decoded world fallback; the small one stays */
         free(s_map_data);
         s_map_data = NULL;
     }
+}
+
+static void close_cb(lv_event_t *e)
+{
+    ui_map_close();
 }
 
 /* Decode a bundled PNG once into a persistent RGB565 buffer. Draw-time PNG
@@ -179,8 +203,11 @@ static void project(double lat, double lon, lv_coord_t *x, lv_coord_t *y)
     if (s_view_ok) {
         int xx, yy;
         tilemap_project(&s_view, lat, lon, &xx, &yy);
-        *x = (lv_coord_t)xx;
-        *y = (lv_coord_t)(yy + MAP_Y);
+        /* render space -> screen: the bitmap is zoomed by MAP_W / s_rw
+           around the map area's center (identity on 800x480) */
+        float k = (float)MAP_W / (float)s_rw;
+        *x = (lv_coord_t)(MAP_W / 2 + (xx - s_rw / 2) * k);
+        *y = (lv_coord_t)(MAP_Y + MAP_H / 2 + (yy - s_rh / 2) * k);
         return;
     }
     float k = world_scale();
@@ -308,17 +335,33 @@ static void build_content(void)
     lv_label_set_text(xl, LV_SYMBOL_CLOSE);
     lv_obj_center(xl);
 
-    /* Map: tile view when rendered, bundled world map otherwise */
-    const lv_img_dsc_t *map = s_view_ok ? &s_tiles_dsc : ui_map_get_image();
-    if (map != NULL) {
+    /* Map: tile view when rendered, bundled world map otherwise. LVGL zooms
+     * around the image center, so each bitmap's nominal box is centered on
+     * the map area and a uniform zoom fills it. */
+    if (s_view_ok) {
         lv_obj_t *img = lv_img_create(s_overlay);
-        lv_img_set_src(img, map);
-        if (s_view_ok) {
-            lv_obj_set_pos(img, 0, MAP_Y);
+        lv_img_set_src(img, &s_tiles_dsc);
+        if (s_rw < MAP_W) {
+            lv_img_set_zoom(img, (uint16_t)((float)MAP_W / (float)s_rw * 256.0f + 0.5f));
+            lv_obj_set_pos(img, MAP_W / 2 - s_rw / 2, MAP_Y + MAP_H / 2 - s_rh / 2);
         } else {
-            lv_img_set_zoom(img, (uint16_t)(world_scale() * 256.0f + 0.5f));
-            lv_obj_set_pos(img, (MAP_W - WORLD_W) / 2,
-                                MAP_Y + (MAP_H - WORLD_H) / 2);
+            lv_obj_set_pos(img, 0, MAP_Y);
+        }
+    } else {
+        /* the big world.png is freed on every close and re-decoding needs
+           ~2 MB of large blocks, which the 7B rarely has; the small one is
+           resident (the map view uses it) and has the same 2:1 projection */
+        const lv_img_dsc_t *world = ui_map_get_image();
+        if (world == NULL) {
+            world = ui_map_get_image_small();
+        }
+        if (world != NULL) {
+            lv_obj_t *img = lv_img_create(s_overlay);
+            lv_img_set_src(img, world);
+            float z = world_scale() * (float)WORLD_W / (float)world->header.w;
+            lv_img_set_zoom(img, (uint16_t)(z * 256.0f + 0.5f));
+            lv_obj_set_pos(img, (MAP_W - (int)world->header.w) / 2,
+                                MAP_Y + (MAP_H - (int)world->header.h) / 2);
         }
     }
 
@@ -507,14 +550,18 @@ static void map_tiles_job(void)
         s_half_lon = hlon;
     }
 
-    if (s_tiles == NULL) {
-        s_tiles = heap_caps_malloc(MAP_W * MAP_H * 2, MALLOC_CAP_SPIRAM);
-    }
+    /* canvas and size are fixed at open, in LVGL context; a close during
+       the render only drops the result (generation check below) */
+    uint16_t *dst = s_canvas;
+    int rw = s_rw, rh = s_rh;
     tile_view_t view;
-    bool ok = s_tiles != NULL &&
-              tilemap_render(s_tiles, MAP_W, MAP_H,
+    bool ok = dst != NULL &&
+              tilemap_render(dst, rw, rh,
                              latmin - mlat, latmax + mlat,
                              lonmin - mlon, lonmax + mlon, &view);
+    if (dst == NULL) {
+        ESP_LOGW(TAG, "no canvas, route map stays on the world picture");
+    }
 
     if (lvgl_port_lock(-1)) {
         if (ok && s_overlay != NULL && gen == s_generation) {
@@ -522,10 +569,10 @@ static void map_tiles_job(void)
             s_view_ok = true;
             s_tiles_dsc.header.always_zero = 0;
             s_tiles_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
-            s_tiles_dsc.header.w = MAP_W;
-            s_tiles_dsc.header.h = MAP_H;
-            s_tiles_dsc.data = (const uint8_t *)s_tiles;
-            s_tiles_dsc.data_size = MAP_W * MAP_H * 2;
+            s_tiles_dsc.header.w = rw;
+            s_tiles_dsc.header.h = rh;
+            s_tiles_dsc.data = (const uint8_t *)dst;
+            s_tiles_dsc.data_size = (size_t)rw * rh * 2;
             lv_obj_clean(s_overlay);
             build_content();
         }
@@ -559,6 +606,30 @@ void ui_map_open(const aircraft_t *ac, const route_info_t *rt)
     s_pan_dlat = 0;
     s_pan_dlon = 0;
     s_generation++;
+
+    s_rw = MAP_W > ROUTE_RENDER_MAX_W ? ROUTE_RENDER_MAX_W : MAP_W;
+    s_rh = MAP_H * s_rw / MAP_W;
+    /* An own canvas left over from a close during a render is reused;
+     * otherwise borrow the screensaver's (800x480 on the big panels, which
+     * fits the 800-wide render on every supported board). */
+    if (s_canvas == NULL) {
+        int cw, ch;
+        uint16_t *c = ui_amb_canvas_hold(&cw, &ch);
+        if (c != NULL && (long)cw * ch >= (long)s_rw * s_rh) {
+            s_canvas = c;
+            s_canvas_lent = true;
+        } else {
+            if (c != NULL) {
+                ui_amb_canvas_release();
+            }
+            s_canvas = heap_caps_malloc((size_t)s_rw * s_rh * 2, MALLOC_CAP_SPIRAM);
+            if (s_canvas == NULL) {
+                ESP_LOGW(TAG, "canvas alloc failed (%u B, largest free PSRAM block %u B)",
+                         (unsigned)((size_t)s_rw * s_rh * 2),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+            }
+        }
+    }
 
     s_overlay = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_overlay, LV_HOR_RES, LV_VER_RES);
