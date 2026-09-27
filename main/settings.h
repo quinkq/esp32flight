@@ -64,6 +64,8 @@ typedef struct {
     double  fav_lat[3], fav_lon[3];
     bool    map_light;        /* lift dark map tiles for readability (#10) */
     bool    retro_map;        /* green map underlay on the retro scope */
+    uint8_t cycle_s;          /* auto-cycle interval, 6..60 s (0 from an old blob = 6) */
+    bool    cycle_routed;     /* auto-cycle skips flights without a known route */
 } settings_t;
 
 /* Load from NVS (menuconfig values as first-boot defaults). Call once at

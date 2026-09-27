@@ -227,6 +227,10 @@ static const char INDEX_HTML[] =
 "<div><label>METAR style</label><select id='c_metar_decoded'><option value='0'>raw</option><option value='1'>decoded</option></select></div>"
 "<div><label>Auto-cycle flights</label><select id='c_follow_mode'><option value='0'>on (default)</option><option value='1'>off, follow selection</option></select>"
 "<div class='help'>Off keeps the selected flight on screen until you pick another one.</div></div>"
+"<div><label>Auto-cycle every (seconds, 6-60)</label><input id='c_cycle_s' type='number' min='6' max='60'>"
+"<div class='help'>How long each flight stays on the map and radar views while auto-cycling. Default 6.</div></div>"
+"<div><label>Auto-cycle through</label><select id='c_cycle_routed'><option value='0'>all flights (default)</option><option value='1'>only flights with a known route</option></select>"
+"<div class='help'>Skips flights whose origin and destination are unknown, mostly private and training traffic. They stay in the list.</div></div>"
 "<div><label>Map screensaver after (minutes, 0 = off)</label><input id='c_ambient_idle_min' type='number'>"
 "<div class='help'>Full-screen map of your area after this many idle minutes. Tap to return.</div></div>"
 "<div><label>Night mode</label><select id='c_night_enabled'><option value='0'>off</option><option value='1'>on</option></select>"
@@ -530,7 +534,8 @@ static const char INDEX_HTML[] =
 "c.input_map=inSerialize();"
 "c.local_adsb_use=document.getElementById('c_local_adsb_use').value==='1';"
 "['taf','iss','sonde','ships','airspace'].forEach(k=>c[k+'_enabled']=document.getElementById('c_'+k+'_enabled').value==='1');"
-"['metric_units','metar_decoded','follow_mode','temp_f'].forEach(k=>c[k]=document.getElementById('c_'+k).value==='1');"
+"['metric_units','metar_decoded','follow_mode','temp_f','cycle_routed'].forEach(k=>c[k]=document.getElementById('c_'+k).value==='1');"
+"c.cycle_s=+document.getElementById('c_cycle_s').value;"
 "c.favs=favs.map(f=>f&&f.name?f:{name:'',lat:0,lon:0});"
 "c.amb_style=+document.getElementById('c_amb_style').value;"
 "const num=v=>parseFloat(String(v).replace(',','.'));"
@@ -711,6 +716,8 @@ static esp_err_t config_get(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "temp_f", c->temp_f);
     cJSON_AddBoolToObject(root, "metar_decoded", c->metar_decoded);
     cJSON_AddBoolToObject(root, "follow_mode", c->follow_mode);
+    cJSON_AddNumberToObject(root, "cycle_s", c->cycle_s);
+    cJSON_AddBoolToObject(root, "cycle_routed", c->cycle_routed);
     cJSON *jf = cJSON_AddArrayToObject(root, "favs");
     for (int f = 0; f < 3; f++) {
         cJSON *e = cJSON_CreateObject();
@@ -795,6 +802,8 @@ static esp_err_t backup_get(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "temp_f", c->temp_f);
     cJSON_AddBoolToObject(root, "metar_decoded", c->metar_decoded);
     cJSON_AddBoolToObject(root, "follow_mode", c->follow_mode);
+    cJSON_AddNumberToObject(root, "cycle_s", c->cycle_s);
+    cJSON_AddBoolToObject(root, "cycle_routed", c->cycle_routed);
     cJSON *favs = cJSON_AddArrayToObject(root, "favs");
     for (int f = 0; f < 3; f++) {
         cJSON *e = cJSON_CreateObject();
@@ -940,6 +949,13 @@ static esp_err_t config_post(httpd_req_t *req)
     }
     if (cJSON_IsBool((j = cJSON_GetObjectItem(root, "follow_mode")))) {
         c->follow_mode = cJSON_IsTrue(j);
+    }
+    if (cJSON_IsNumber((j = cJSON_GetObjectItem(root, "cycle_s")))) {
+        int s = j->valueint;
+        c->cycle_s = (uint8_t)(s < 6 ? 6 : s > 60 ? 60 : s);
+    }
+    if (cJSON_IsBool((j = cJSON_GetObjectItem(root, "cycle_routed")))) {
+        c->cycle_routed = cJSON_IsTrue(j);
     }
     const cJSON *jfav = cJSON_GetObjectItem(root, "favs");
     if (cJSON_IsArray(jfav)) {
