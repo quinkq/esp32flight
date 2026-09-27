@@ -85,7 +85,25 @@ void runways_draw(uint16_t *fb, int w, int h, const tile_view_t *view)
     if (s_count < 0) {
         load();
     }
+    /* Cull with plain comparisons first. Projecting all ~4,200 runways
+     * worldwide (two soft-float log/tan/cos each on the S3) held CPU 0 past
+     * the 5 s task watchdog in the screensaver pre-render on the 7B. A
+     * runway is skipped only when both ends lie beyond the same edge. */
+    double la0, la1, lo0, lo1;
+    bool lon_ok = tilemap_view_bounds(view, &la0, &la1, &lo0, &lo1);
+    const float m = 0.1f;   /* margin, degrees */
+    const float fla0 = (float)la0 - m, fla1 = (float)la1 + m;
+    const float flo0 = (float)lo0 - m, flo1 = (float)lo1 + m;
     for (int i = 0; i < s_count; i++) {
+        const runway_t *r = &s_rw[i];
+        if ((r->le_lat < fla0 && r->he_lat < fla0) ||
+            (r->le_lat > fla1 && r->he_lat > fla1)) {
+            continue;
+        }
+        if (lon_ok && ((r->le_lon < flo0 && r->he_lon < flo0) ||
+                       (r->le_lon > flo1 && r->he_lon > flo1))) {
+            continue;
+        }
         int x0, y0, x1, y1;
         tilemap_project(view, s_rw[i].le_lat, s_rw[i].le_lon, &x0, &y0);
         tilemap_project(view, s_rw[i].he_lat, s_rw[i].he_lon, &x1, &y1);
