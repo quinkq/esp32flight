@@ -9,6 +9,9 @@
  * route too (position only). Call from LVGL context. */
 void ui_map_open(const aircraft_t *ac, const route_info_t *rt);
 
+/* Close the overlay if open (no-op otherwise). LVGL context. */
+void ui_map_close(void);
+
 /* Lazily-loaded world map images (equirectangular), NULL if missing. */
 const lv_img_dsc_t *ui_map_get_image(void);        /* 800x400 */
 const lv_img_dsc_t *ui_map_get_image_small(void);  /* 490x245, for the embedded panel */

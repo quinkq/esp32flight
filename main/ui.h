@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "flight_model.h"
 
 /* All ui_* functions must be called while holding the LVGL lock
@@ -47,3 +48,9 @@ void ui_set_home(double lat, double lon);
 /* Replace displayed flight data. Routes are looked up via routes_get_cached
  * and snapshotted, so later touch interactions don't race the network task. */
 void ui_update(const aircraft_list_t *list);
+
+/* Lend the screensaver's permanent map canvas (w x h RGB565) to the
+ * full-screen route map for as long as it's open. NULL if unavailable.
+ * LVGL context only. */
+uint16_t *ui_amb_canvas_hold(int *w, int *h);
+void ui_amb_canvas_release(void);
