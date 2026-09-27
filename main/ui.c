@@ -164,7 +164,6 @@ static bool view_shows_ships(void);
 /* Bundled world-map fallback image size (tiles replace it once rendered) */
 #define EMB_BASE_W  490
 #define EMB_BASE_H  245
-#define CYCLE_MS    6000
 static int        s_view_mode;
 static lv_timer_t *s_cycle_timer;
 static lv_timer_t *s_retro_timer;   /* 25 Hz sweep, paused when invisible */
@@ -173,6 +172,7 @@ static lv_obj_t *s_map_panel;
 static lv_obj_t *s_emb_img;
 static lv_obj_t *s_emb_line, *s_emb_orig, *s_emb_dest, *s_emb_plane, *s_emb_trail;
 static lv_obj_t *s_emb_line2;
+static lv_obj_t *s_emb_orig_lbl, *s_emb_dest_lbl;   /* airport codes at the route ends */
 static lv_point_t s_emb_pts[33];
 static lv_point_t s_emb_trail_pts[TRAIL_LEN];
 
@@ -181,6 +181,7 @@ static uint16_t     *s_emb_tiles;
 static lv_img_dsc_t  s_emb_tiles_dsc;
 static tile_view_t   s_emb_view;
 static bool          s_emb_view_ok;
+static bool          s_emb_tiles_shown;   /* s_emb_img shows a tile render (else the world map) */
 static char          s_emb_key[24];       /* key of the rendered view */
 static int64_t       s_emb_partial_ms;     /* nonzero: rendered with missing tiles */
 static int           s_emb_missing;
@@ -628,12 +629,46 @@ static void row_click_cb(lv_event_t *e)
     }
 }
 
+/* Auto-cycle interval from settings (6..60 s); 0 (unset in an old settings
+ * blob) and out-of-range values fall back to the historical 6 s. */
+static uint32_t cycle_period_ms(void)
+{
+    int s = settings_get()->cycle_s;
+    return (uint32_t)(s >= 6 && s <= 60 ? s : 6) * 1000U;
+}
+
+/* Route-only cycling skips flights without a known route: the map view is
+ * about the route, and those are mostly private and training traffic. */
+static bool cycle_eligible(int i)
+{
+    if (!settings_get()->cycle_routed) {
+        return true;
+    }
+    return s_shown[i].route.callsign[0] && s_shown[i].route.valid;
+}
+
 static void cycle_timer_cb(lv_timer_t *t)
 {
+    /* picks up a changed interval (the app build applies settings live) */
+    uint32_t period = cycle_period_ms();
+    if (t->period != period) {
+        lv_timer_set_period(t, period);
+    }
     if (s_shown_count == 0 || settings_get()->follow_mode) {
         return;
     }
-    s_selected = (s_selected + 1) % s_shown_count;
+    int next = -1;
+    for (int k = 1; k <= s_shown_count; k++) {
+        int i = (s_selected + k) % s_shown_count;   /* s_selected may be -1 */
+        if (cycle_eligible(i)) {
+            next = i;
+            break;
+        }
+    }
+    if (next < 0 || next == s_selected) {
+        return;   /* nothing (else) to cycle to: stay on the current flight */
+    }
+    s_selected = next;
     strlcpy(s_selected_hex, s_shown[s_selected].ac.hex, sizeof(s_selected_hex));
     render_list_selection();
     render_right();
@@ -644,15 +679,9 @@ static void cycle_timer_cb(lv_timer_t *t)
     }
 }
 
-static void emb_release(void);
-
 static void apply_view(int mode)
 {
-    int prev = s_view_mode;
     s_view_mode = mode % VIEW_COUNT;
-    if (prev == VIEW_MAP && s_view_mode != VIEW_MAP) {
-        emb_release();
-    }
 
     lv_obj_add_flag(s_detail_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_map_panel, LV_OBJ_FLAG_HIDDEN);
@@ -713,16 +742,6 @@ void ui_set_list_mode(int mode)
         }
         render_list_rows();
         render_right();
-    }
-}
-
-static void emb_release(void)
-{
-    if (!s_emb_busy && s_emb_tiles != NULL) {
-        free(s_emb_tiles);
-        s_emb_tiles = NULL;
-        s_emb_view_ok = false;
-        s_emb_key[0] = '\0';
     }
 }
 
@@ -980,6 +999,21 @@ static void project_emb(double lat, double lon, lv_coord_t *x, lv_coord_t *y)
     *y = (lv_coord_t)(EMB_MAP_H / 2 + ((90.0 - lat) / 180.0 - 0.5) * EMB_BASE_H * k);
 }
 
+/* Bundled world map in the map view: before the first tiles land, when a
+ * render failed, or when there's nothing to center on. */
+static void emb_show_fallback(void)
+{
+    s_emb_view_ok = false;
+    s_emb_tiles_shown = false;
+    const lv_img_dsc_t *fallback = ui_map_get_image_small();
+    if (fallback != NULL) {
+        img_src_if_changed(s_emb_img, fallback);
+        lv_img_set_zoom(s_emb_img, (uint16_t)(emb_world_scale() * 256.0f + 0.5f));
+        lv_obj_set_pos(s_emb_img, (EMB_MAP_W - EMB_BASE_W) / 2,
+                                 (EMB_MAP_H - EMB_BASE_H) / 2);
+    }
+}
+
 /* Cross-canvas compose instead of a dedicated scratch buffer: the radar
  * and the ambient screensaver are never visible at the same time, so
  * whichever is hidden lends its canvas as the compose target and the
@@ -1035,6 +1069,18 @@ static void emb_tiles_job(void)
     bool in_place = scratch == NULL;
     if (in_place) {
         scratch = s_emb_tiles;
+        /* composing into the buffer the map view displays: show the world
+           map meanwhile, or a half-drawn frame could appear when whatever
+           covers the view (screensaver, route map) goes away mid-render */
+        if (lvgl_port_lock(-1)) {
+            if (s_emb_tiles_shown) {
+                emb_show_fallback();
+                if (s_view_mode == VIEW_MAP) {
+                    render_map_panel();   /* markers onto the world map */
+                }
+            }
+            lvgl_port_unlock();
+        }
     }
     tile_view_t view;
     bool ok = scratch != NULL &&
@@ -1069,6 +1115,7 @@ static void emb_tiles_job(void)
             s_emb_tiles_dsc.data = (const uint8_t *)s_emb_tiles;
             s_emb_tiles_dsc.data_size = (size_t)EMB_RENDER_W * EMB_RENDER_H * 2;
             lv_img_set_src(s_emb_img, &s_emb_tiles_dsc);
+            s_emb_tiles_shown = true;
             if (EMB_MAP_W > EMB_RENDER_W) {
                 lv_img_set_zoom(s_emb_img, (uint16_t)(EMB_K * 256.0f + 0.5f));
                 lv_obj_set_pos(s_emb_img, EMB_MAP_W / 2 - EMB_RENDER_W / 2,
@@ -1078,6 +1125,14 @@ static void emb_tiles_job(void)
                 lv_obj_set_pos(s_emb_img, 0, 0);
             }
             lv_obj_invalidate(s_emb_img);
+            if (s_view_mode == VIEW_MAP) {
+                render_map_panel();
+            }
+        } else if (strcmp(key, s_emb_want_key) == 0 && s_emb_tiles_shown &&
+                   !s_emb_view_ok) {
+            /* this route's render failed while another route's map was
+               still up: fall back to the world map so the markers show */
+            emb_show_fallback();
             if (s_view_mode == VIEW_MAP) {
                 render_map_panel();
             }
@@ -1096,20 +1151,24 @@ static void emb_tiles_want(const aircraft_t *ac, const route_info_t *rt)
     } else {
         snprintf(key, sizeof(key), "@%s", ac->hex);
     }
+    /* Another flight's route: the shown tile view no longer fits, so the
+     * projection falls back to the world map (bounded coordinates) and
+     * render_map_panel hides the markers until this route's tiles land.
+     * Set even while a render is busy, before the early return. */
+    if (strcmp(key, s_emb_key) != 0) {
+        s_emb_view_ok = false;
+    }
     bool emb_stale = s_emb_partial_ms != 0 &&
                      esp_timer_get_time() / 1000 - s_emb_partial_ms > 20000;
     if ((strcmp(key, s_emb_key) == 0 && !emb_stale) || s_emb_busy) {
         return;
     }
 
-    /* fall back to the bundled map while tiles load */
-    s_emb_view_ok = false;
-    const lv_img_dsc_t *fallback = ui_map_get_image_small();
-    if (fallback != NULL) {
-        lv_img_set_src(s_emb_img, fallback);
-        lv_img_set_zoom(s_emb_img, (uint16_t)(emb_world_scale() * 256.0f + 0.5f));
-        lv_obj_set_pos(s_emb_img, (EMB_MAP_W - EMB_BASE_W) / 2,
-                                 (EMB_MAP_H - EMB_BASE_H) / 2);
+    /* Only the first render waits on the bundled world map. After that the
+     * previous route's tiles stay up until the new ones are rendered: a
+     * flash to the world picture on every cycle step read as flicker. */
+    if (!s_emb_tiles_shown) {
+        emb_show_fallback();
     }
 
     double latmin, latmax, lonmin, lonmax;
@@ -1132,6 +1191,7 @@ static void emb_tiles_want(const aircraft_t *ac, const route_info_t *rt)
         lonmin = ac->lon - 2.0;
         lonmax = ac->lon + 2.0;
     } else {
+        emb_show_fallback();   /* no route, no position: nothing to center on */
         return;
     }
     double mlat = (latmax - latmin) * 0.2 + 0.4;
@@ -1174,6 +1234,40 @@ static lv_obj_t *emb_marker(lv_obj_t *parent, int d, lv_color_t color)
     return m;
 }
 
+/* Airport code next to a route end, styled like the full-screen route
+ * map's (ui_map.c code_label). */
+static lv_obj_t *emb_code_label(lv_obj_t *parent, lv_color_t color)
+{
+    lv_obj_t *l = make_label(parent, UIFONT(&font_pl_14, &font_pl_8), color);
+    lv_obj_set_style_bg_color(l, COL_BG, 0);
+    lv_obj_set_style_bg_opa(l, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(l, UISX(4), 0);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_HIDDEN);
+    return l;
+}
+
+/* Up and right of the marker at (x, y), kept inside the map area. */
+static void emb_code_place(lv_obj_t *l, lv_coord_t x, lv_coord_t y, const airport_t *apt)
+{
+    label_set_if_changed(l, apt->iata[0] ? apt->iata : apt->icao);
+    x += UISX(8);
+    y -= UISY(24);
+    if (x > EMB_MAP_W - UISX(50)) {
+        x = EMB_MAP_W - UISX(50);
+    }
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+    if (y > EMB_MAP_H - UISY(22)) {
+        y = EMB_MAP_H - UISY(22);
+    }
+    lv_obj_set_pos(l, x, y);
+    lv_obj_clear_flag(l, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void build_map_panel(lv_obj_t *scr)
 {
     s_map_panel = make_panel(scr);
@@ -1212,6 +1306,8 @@ static void build_map_panel(lv_obj_t *scr)
 
     s_emb_orig = emb_marker(s_map_panel, 10, lv_color_hex(0x39d98a));
     s_emb_dest = emb_marker(s_map_panel, 10, lv_color_hex(0xff6b6b));
+    s_emb_orig_lbl = emb_code_label(s_map_panel, lv_color_hex(0x39d98a));
+    s_emb_dest_lbl = emb_code_label(s_map_panel, lv_color_hex(0xff6b6b));
     s_emb_plane = plane_img(s_map_panel);
 
     /* tap the map to open the full-screen route map */
@@ -1265,9 +1361,13 @@ static void build_map_panel(lv_obj_t *scr)
 static void render_map_panel(void)
 {
     if (s_selected < 0 || s_selected >= s_shown_count) {
+        lv_obj_add_flag(s_emb_trail, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_line, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_line2, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_orig, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_dest, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_orig_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_dest_lbl, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_plane, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_mb_logo, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s_mb_callsign, "");
@@ -1326,13 +1426,18 @@ static void render_map_panel(void)
         project_emb(rt->origin.lat, rt->origin.lon, &x, &y);
         lv_obj_set_pos(s_emb_orig, x - UISX(5), y - UISY(5));
         lv_obj_clear_flag(s_emb_orig, LV_OBJ_FLAG_HIDDEN);
+        emb_code_place(s_emb_orig_lbl, x, y, &rt->origin);
         project_emb(rt->destination.lat, rt->destination.lon, &x, &y);
         lv_obj_set_pos(s_emb_dest, x - UISX(5), y - UISY(5));
         lv_obj_clear_flag(s_emb_dest, LV_OBJ_FLAG_HIDDEN);
+        emb_code_place(s_emb_dest_lbl, x, y, &rt->destination);
     } else {
         lv_obj_add_flag(s_emb_line, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_line2, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_orig, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_dest, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_orig_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_dest_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (ac->has_pos) {
@@ -1344,6 +1449,20 @@ static void render_map_panel(void)
                                alt_color(ac->alt_baro_ft, ac->on_ground));
         lv_obj_clear_flag(s_emb_plane, LV_OBJ_FLAG_HIDDEN);
     } else {
+        lv_obj_add_flag(s_emb_plane, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* The previous route's map is still up while this flight's renders
+     * (emb_tiles_want): markers projected for it would sit on the wrong
+     * map, so they wait for the new tiles. */
+    if (s_emb_tiles_shown && !s_emb_view_ok) {
+        lv_obj_add_flag(s_emb_trail, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_line, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_line2, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_orig, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_dest, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_orig_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_emb_dest_lbl, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_emb_plane, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -3666,7 +3785,7 @@ void ui_init(void)
         ESP_LOGE(TAG, "tile framebuffer alloc FAILED at boot (amb %d radar %d emb %d)",
                  s_amb_tiles != NULL, s_radar_tiles != NULL, s_emb_tiles != NULL);
     }
-    s_cycle_timer = lv_timer_create(cycle_timer_cb, CYCLE_MS, NULL);
+    s_cycle_timer = lv_timer_create(cycle_timer_cb, cycle_period_ms(), NULL);
     lv_timer_pause(s_cycle_timer);
     lv_timer_create(clock_timer_cb, 5000, NULL);
     lv_timer_create(logo_tick_cb, 500, NULL);
