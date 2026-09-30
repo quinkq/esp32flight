@@ -377,6 +377,23 @@ static void merc_norm(double lat, double lon, double *nx, double *ny)
     *ny = (1.0 - log(tan(rad) + 1.0 / cos(rad)) / M_PI) / 2.0;
 }
 
+/* normalized web mercator y (0..1) -> latitude */
+static double merc_inv_lat(double ny)
+{
+    return atan(sinh(M_PI * (1.0 - 2.0 * ny))) * 180.0 / M_PI;
+}
+
+bool tilemap_view_bounds(const tile_view_t *v, double *lat_min, double *lat_max,
+                         double *lon_min, double *lon_max)
+{
+    double world = (double)TILE_PX * (1 << v->z);
+    *lat_max = merc_inv_lat(v->py0 / world);
+    *lat_min = merc_inv_lat((v->py0 + v->h) / world);
+    *lon_min = v->px0 / world * 360.0 - 180.0;
+    *lon_max = (v->px0 + v->w) / world * 360.0 - 180.0;
+    return v->px0 >= 0 && v->px0 + v->w <= world;
+}
+
 void tilemap_project(const tile_view_t *v, double lat, double lon, int *x, int *y)
 {
     double nx, ny;

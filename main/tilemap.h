@@ -46,3 +46,10 @@ const char *tilemap_source_credit(void);
 
 /* Project WGS84 to view pixel coordinates. */
 void tilemap_project(const tile_view_t *v, double lat, double lon, int *x, int *y);
+
+/* Geographic bounds of a view, for culling with plain comparisons before
+ * paying for tilemap_project (soft-float log/tan/cos on the S3). Returns
+ * false when the view crosses the antimeridian: then only the latitude
+ * range is meaningful. */
+bool tilemap_view_bounds(const tile_view_t *v, double *lat_min, double *lat_max,
+                         double *lon_min, double *lon_max);
