@@ -152,7 +152,7 @@ _Static_assert(sizeof(((lang_t *)0)->view_names) / sizeof(((lang_t *)0)->view_na
  * button, status line. Left to right: clock, weather text, which gets the
  * rest. The view button is wider on the big panels. */
 #define HDR_GEAR_W   46
-#define HDR_VIEW_W   (SCR_W > 800 ? 240 : 150)
+#define HDR_VIEW_W   (SCR_W > 800 ? 200 : 150)
 #define HDR_VIEW_R   (10 + HDR_GEAR_W + 8)                 /* button's right edge from the screen edge */
 #define HDR_STATUS_W 230
 #define HDR_STATUS_R (HDR_VIEW_R + HDR_VIEW_W + 10)
