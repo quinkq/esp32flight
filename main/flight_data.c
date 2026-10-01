@@ -113,6 +113,11 @@ static void parse_aircraft(const cJSON *jac, aircraft_t *ac)
     }
     if ((j = cJSON_GetObjectItem(jac, "flight")) && cJSON_IsString(j)) {
         copy_trimmed(ac->callsign, sizeof(ac->callsign), j->valuestring);
+        /* an all-zero callsign field decodes as "@@@@@@@@": no callsign */
+        if (ac->callsign[0] == '@' &&
+            strspn(ac->callsign, "@") == strlen(ac->callsign)) {
+            ac->callsign[0] = '\0';
+        }
     }
     if ((j = cJSON_GetObjectItem(jac, "r")) && cJSON_IsString(j)) {
         strlcpy(ac->reg, j->valuestring, sizeof(ac->reg));
