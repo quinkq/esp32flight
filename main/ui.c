@@ -214,9 +214,10 @@ static lv_obj_t *s_amb_ring, *s_amb_home;
 static lv_obj_t *s_amb_selbub;
 static bool s_amb_retro;          /* overlay currently hosts the retro panel */
 static bool s_retro_was_hidden;
-static char s_amb_sel_cs[9];   /* callsign picked by tapping its sprite */
+static char s_amb_sel_hex[ICAO_HEX_LEN];   /* aircraft picked by tapping its sprite */
 typedef struct {
     char  callsign[9];
+    char  hex[ICAO_HEX_LEN];   /* unique id; callsigns can be empty or shared */
     float lat, lon, track;
     float dist_nm, dir_deg;
     int   alt_ft;
@@ -1776,11 +1777,12 @@ static void radar_zoom_cb(lv_event_t *e)
 static void radar_dot_cb(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
-    if (i < 0 || i >= s_all_count || s_all[i].callsign[0] == '\0') {
+    if (i < 0 || i >= s_all_count) {
         return;
     }
+    /* by hex: aircraft without a callsign must be tappable too */
     for (int j = 0; j < s_shown_count; j++) {
-        if (strcmp(s_shown[j].ac.callsign, s_all[i].callsign) == 0) {
+        if (strcmp(s_shown[j].ac.hex, s_all[i].hex) == 0) {
             if (j == s_selected && s_sel_ship_mmsi == 0) {
                 /* second tap on the selected plane toggles the bubble away */
                 s_radar_bub_off = !s_radar_bub_off;
@@ -2416,6 +2418,7 @@ static void render_radar_panel(void)
     const aircraft_t *selac = (s_selected >= 0 && s_selected < s_shown_count)
                                   ? &s_shown[s_selected].ac : NULL;
     bool planes_on = view_shows_planes();
+    bool bub_placed = false;   /* the selected aircraft is drawn this pass */
     for (int i = 0; i < MAX_AIRCRAFT; i++) {
         if (!planes_on || i >= s_all_count || s_all[i].dist_nm < 0) {
             lv_obj_add_flag(s_radar_dots[i], LV_OBJ_FLAG_HIDDEN);
@@ -2438,8 +2441,8 @@ static void render_radar_panel(void)
             x = RADAR_CX + (int)(sinf(rad) * frac * RADAR_R);
             y = RADAR_CY - (int)(cosf(rad) * frac * RADAR_R);
         }
-        bool sel = selac != NULL && selac->callsign[0] &&
-                   strcmp(t->callsign, selac->callsign) == 0;
+        /* by hex: callsigns can be empty or shared ("@@@@@@@@") */
+        bool sel = selac != NULL && strcmp(t->hex, selac->hex) == 0;
         lv_obj_set_pos(s_radar_dots[i], x - 14, y - 14);   /* UIZOOM keeps the 28px box */
         img_src_if_changed(s_radar_dots[i], class_sprite(t->fcls));
         lv_img_set_angle(s_radar_dots[i], (int)(t->track * 10));
@@ -2487,10 +2490,12 @@ static void render_radar_panel(void)
                 ly = RADAR_H - UISY(60);
             }
             lv_obj_set_pos(s_radar_bub, lx, ly);
+            bub_placed = true;
         }
     }
-    if (!planes_on || s_selected < 0 || s_selected >= s_shown_count ||
-        selac == NULL) {
+    /* nothing drawn for the selection (off a zoomed map, no position):
+       hide the bubble rather than keep the previous aircraft's */
+    if (!bub_placed) {
         lv_obj_add_flag(s_radar_bub, LV_OBJ_FLAG_HIDDEN);
     }
     render_radar_extras(map_mode, radius_nm);
@@ -2782,15 +2787,17 @@ static void render_ambient(void)
     /* bubble for the tapped aircraft */
     if (s_amb_selbub != NULL) {
         int sel = -1;
-        for (int i = 0; proj_usable && s_amb_sel_cs[0] && i < s_all_count; i++) {
-            if (strcmp(s_all[i].callsign, s_amb_sel_cs) == 0) {
+        for (int i = 0; proj_usable && s_amb_sel_hex[0] && i < s_all_count; i++) {
+            if (strcmp(s_all[i].hex, s_amb_sel_hex) == 0) {
                 sel = i;
                 break;
             }
         }
         if (sel >= 0) {
             char txt[160];
-            const route_info_t *rt = routes_get_cached(s_all[sel].callsign);
+            const char *name = s_all[sel].callsign[0] ? s_all[sel].callsign : s_all[sel].hex;
+            const route_info_t *rt = s_all[sel].callsign[0]
+                                         ? routes_get_cached(s_all[sel].callsign) : NULL;
             if (rt != NULL && rt->valid) {
                 char ua[20];
                 char cities[64];
@@ -2805,7 +2812,7 @@ static void render_ambient(void)
                     cities[0] = '\0';
                 }
                 snprintf(txt, sizeof(txt), "%s\n%s " LV_SYMBOL_RIGHT " %s%s\n%s",
-                         s_all[sel].callsign,
+                         name,
                          rt->origin.iata[0] ? rt->origin.iata : rt->origin.icao,
                          rt->destination.iata[0] ? rt->destination.iata
                                                  : rt->destination.icao,
@@ -2813,7 +2820,7 @@ static void render_ambient(void)
                          units_alt(s_all[sel].alt_ft, ua, sizeof(ua)));
             } else {
                 char ua[20];
-                snprintf(txt, sizeof(txt), "%s\n%s", s_all[sel].callsign,
+                snprintf(txt, sizeof(txt), "%s\n%s", name,
                          units_alt(s_all[sel].alt_ft, ua, sizeof(ua)));
             }
             lv_label_set_text(s_amb_selbub, txt);
@@ -2928,7 +2935,7 @@ static void amb_close(void)
          * pressure used to guarantee the re-allocation would fail later
          * in a fragmented PSRAM (the 7B's forever-dark screensaver). */
         s_amb_scale = 1.0f;
-        s_amb_sel_cs[0] = '\0';
+        s_amb_sel_hex[0] = '\0';
         /* ui_update skipped list/right renders while the overlay covered
          * them; bring the underlying panels back up to date now */
         render_list_rows();
@@ -2965,12 +2972,12 @@ static void amb_click_cb(lv_event_t *e)
             }
         }
         if (best >= 0) {
-            strlcpy(s_amb_sel_cs, s_all[best].callsign, sizeof(s_amb_sel_cs));
+            strlcpy(s_amb_sel_hex, s_all[best].hex, sizeof(s_amb_sel_hex));
             render_ambient();
             return;
         }
-        if (s_amb_sel_cs[0]) {      /* deselect first, close on next tap */
-            s_amb_sel_cs[0] = '\0';
+        if (s_amb_sel_hex[0]) {     /* deselect first, close on next tap */
+            s_amb_sel_hex[0] = '\0';
             render_ambient();
             return;
         }
@@ -3382,7 +3389,8 @@ static void render_retro_panel(void)
         int y = cy - (int)(cosf(rad) * frac * r);
         lv_obj_set_pos(s_retro_blips[i], x - UISX(3), y - UISY(3));
         lv_obj_set_pos(s_retro_lbls[i], x + UISX(8), y - UISY(7));
-        lv_label_set_text(s_retro_lbls[i], s_all[i].callsign);
+        lv_label_set_text(s_retro_lbls[i], s_all[i].callsign[0] ? s_all[i].callsign
+                                                                : s_all[i].hex);
         lv_obj_clear_flag(s_retro_blips[i], LV_OBJ_FLAG_HIDDEN);
         s_retro_bearing[i] = s_all[i].dir_deg;
         s_retro_valid[i] = true;
@@ -4387,6 +4395,7 @@ void ui_update(const aircraft_list_t *list)
         }
         amb_target_t *t = &s_all[s_all_count++];
         strlcpy(t->callsign, list->ac[i].callsign, sizeof(t->callsign));
+        strlcpy(t->hex, list->ac[i].hex, sizeof(t->hex));
         t->lat = (float)list->ac[i].lat;
         t->lon = (float)list->ac[i].lon;
         t->track = list->ac[i].track_deg;
