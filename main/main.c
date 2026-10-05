@@ -18,6 +18,7 @@
 #include "ui_map.h"
 #include "web_server.h"
 #include "wifi_mgr.h"
+#include "station_rx.h"   /* weather-station fork: ws_alpha receiver */
 
 static const char *TAG = "canflight";
 
@@ -74,6 +75,8 @@ void app_main(void)
     err = wifi_mgr_start();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Wi-Fi init failed: %s", esp_err_to_name(err));
+    } else {
+        station_rx_start();
     }
 
     input_ctl_init();

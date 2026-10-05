@@ -68,6 +68,7 @@ idf_component_register(
         "font_pl_20.c"
     INCLUDE_DIRS "." ${BOARD_PORT_INC} "tab5"
     REQUIRES esp_wifi esp_http_client esp_http_server esp-tls nvs_flash json spiffs esp_netif app_update mqtt
+             station-rx
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_LVGL_H_INCLUDE_SIMPLE=1)

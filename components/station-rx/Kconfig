@@ -1,0 +1,47 @@
+menu "Weather station receiver"
+
+    config STATION_RX_ENABLED
+        bool "Receive the ws_alpha outdoor station"
+        default n
+        help
+            Off in public builds. The pairing (the station's MAC and the two
+            keys) comes from a config fragment kept outside the repository.
+
+    config STATION_RX_PEER_MAC
+        string "Station MAC (aa:bb:cc:dd:ee:ff)"
+        depends on STATION_RX_ENABLED
+        default ""
+
+    config STATION_RX_PMK
+        string "PMK, 32 hex digits"
+        depends on STATION_RX_ENABLED
+        default ""
+
+    config STATION_RX_LMK
+        string "LMK, 32 hex digits"
+        depends on STATION_RX_ENABLED
+        default ""
+
+    choice STATION_RX_INTERVAL
+        prompt "Measurement interval sent to the station"
+        depends on STATION_RX_ENABLED
+        default STATION_RX_INTERVAL_900
+        help
+            Sent with every reply; the station uses it from its next wake on.
+            Must divide 900 s, the display's storage grid.
+
+        config STATION_RX_INTERVAL_60
+            bool "1 minute (bench)"
+        config STATION_RX_INTERVAL_300
+            bool "5 minutes"
+        config STATION_RX_INTERVAL_900
+            bool "15 minutes"
+    endchoice
+
+    config STATION_RX_INTERVAL_S
+        int
+        default 60 if STATION_RX_INTERVAL_60
+        default 300 if STATION_RX_INTERVAL_300
+        default 900
+
+endmenu
