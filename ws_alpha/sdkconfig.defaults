@@ -20,3 +20,9 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # 1 ms ticks, so the short sensor waits are exact
 CONFIG_FREERTOS_HZ=1000
+
+# Console time is awake time (115200 baud, the CPU waits for the UART):
+# ESP-IDF's own messages (boot, Wi-Fi driver) only from warnings up; the
+# station's modules raise themselves back to INFO in app_main.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y

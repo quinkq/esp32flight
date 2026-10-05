@@ -164,6 +164,14 @@ static void exchange(battery_mode_t mode)
 
 void app_main(void)
 {
+    /* ESP-IDF logs at WARN by default (sdkconfig.defaults); ours at INFO */
+    static const char *const our_tags[] = {
+        "ws_alpha", "power", "battery", "sensors", "backlog", "config", "link",
+    };
+    for (size_t i = 0; i < sizeof(our_tags) / sizeof(our_tags[0]); i++) {
+        esp_log_level_set(our_tags[i], ESP_LOG_INFO);
+    }
+
     power_begin();
 
     const uint32_t now = (uint32_t)time(NULL);
