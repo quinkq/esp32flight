@@ -22,4 +22,14 @@ menu "ws_alpha"
         default 300 if WS_ALPHA_INTERVAL_300
         default 900
 
+    config WS_ALPHA_TX_POWER_DBM
+        int "Maximum transmit power, dBm"
+        range 2 20
+        default 20
+        help
+            Lower power means a lower current peak at each send, i.e. more
+            margin against brownouts on a weak or cold cell. The display is
+            4-10 m away; tune this down once the received signal strength
+            (logged on both sides) is known.
+
 endmenu
