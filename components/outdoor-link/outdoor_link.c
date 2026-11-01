@@ -1,25 +1,27 @@
 /*
- * Receiver for the ws_alpha outdoor station: ws-link (components/ws-link)
- * over ESP-NOW, next to the display's normal Wi-Fi connection.
+ * The display's side of the link to the outdoor unit: ws-link
+ * (components/ws-link) over ESP-NOW, next to the display's normal Wi-Fi
+ * connection.
  *
- *  - The station is the only peer, encrypted with the shared PMK and LMK.
- *  - The radio stays on the access point's channel; the station finds it
- *    by trying channels until a frame is acknowledged.
+ *  - The outdoor unit is the only peer, encrypted with the shared PMK and
+ *    LMK.
+ *  - The radio stays on the access point's channel; the outdoor unit finds
+ *    it by trying channels until a frame is acknowledged.
  *  - Wi-Fi power save is off: with it on, the radio sleeps between the
- *    access point's beacons and misses the station's frames.
+ *    access point's beacons and misses the outdoor unit's frames.
  *  - The receive callback runs in the Wi-Fi task and only queues the frame.
  *    A small task checks it, replies (clock, interval) and logs it. Storage
  *    comes later, and after the reply: records into RAM, the reply, then the
- *    flash write, so the station's 100 ms wait for the reply never depends
- *    on the file system (a crash in between loses that frame).
+ *    flash write, so the outdoor unit's 100 ms wait for the reply never
+ *    depends on the file system (a crash in between loses that frame).
  */
-#include "station_rx.h"
+#include "outdoor_link.h"
 
 #include "esp_log.h"
 
-static const char *TAG = "station_rx";
+static const char *TAG = "outdoor_link";
 
-#if CONFIG_STATION_RX_ENABLED
+#if CONFIG_OUTDOOR_LINK_ENABLED
 
 #include <ctype.h>
 #include <stdio.h>
@@ -34,7 +36,7 @@ static const char *TAG = "station_rx";
 #include "ws_link.h"
 
 #define CLOCK_VALID_FROM 1767225600   /* 2026-01-01: earlier means no NTP time yet */
-#define TASK_PRIORITY    5            /* above the app's tasks (3-4): the station waits 100 ms */
+#define TASK_PRIORITY    5            /* above the app's tasks (3-4): the outdoor unit waits 100 ms */
 
 typedef struct {
     uint8_t data[WS_LINK_MAX_PAYLOAD];
@@ -92,7 +94,7 @@ static void reply(uint16_t seq)
             .seq = seq,
         },
         .unix_now = now >= CLOCK_VALID_FROM ? (uint32_t)now : 0,
-        .interval_s = CONFIG_STATION_RX_INTERVAL_S,
+        .interval_s = CONFIG_OUTDOOR_LINK_INTERVAL_S,
         .cmd = WS_CMD_NONE,
     };
     const esp_err_t err = esp_now_send(s_peer, (const uint8_t *)&r, WS_LINK_REPLY_SIZE);
@@ -134,7 +136,7 @@ static void handle(const rx_item_t *item)
 
     reply(f.hdr.seq);
 
-    const long offset = (long)(time(NULL) - (time_t)f.station_now);
+    const long offset = (long)(time(NULL) - (time_t)f.outdoor_now);
     ESP_LOGI(TAG, "seq %u: %u records, fw %u, reset %u, flags 0x%02x, clock offset %ld s, rssi %d dBm",
              f.hdr.seq, f.count, f.fw_build, f.reset_reason, f.flags, offset, item->rssi);
     ESP_LOGI(TAG, "  since the last ack: awake %lu ms, brownouts %u, resets %u, failed searches %u",
@@ -154,13 +156,13 @@ static void rx_task(void *arg)
     }
 }
 
-void station_rx_start(void)
+void outdoor_link_start(void)
 {
     uint8_t pmk[16], lmk[16];
-    if (!parse_hex(CONFIG_STATION_RX_PEER_MAC, s_peer, sizeof(s_peer)) ||
-        !parse_hex(CONFIG_STATION_RX_PMK, pmk, sizeof(pmk)) ||
-        !parse_hex(CONFIG_STATION_RX_LMK, lmk, sizeof(lmk))) {
-        ESP_LOGE(TAG, "pairing incomplete or malformed in menuconfig; receiver off");
+    if (!parse_hex(CONFIG_OUTDOOR_LINK_PEER_MAC, s_peer, sizeof(s_peer)) ||
+        !parse_hex(CONFIG_OUTDOOR_LINK_PMK, pmk, sizeof(pmk)) ||
+        !parse_hex(CONFIG_OUTDOOR_LINK_LMK, lmk, sizeof(lmk))) {
+        ESP_LOGE(TAG, "pairing incomplete or malformed in menuconfig; link off");
         return;
     }
 
@@ -180,21 +182,21 @@ void station_rx_start(void)
         (err = esp_now_set_pmk(pmk)) != ESP_OK ||
         (err = esp_now_add_peer(&peer)) != ESP_OK ||
         (err = esp_now_register_recv_cb(on_recv)) != ESP_OK) {
-        ESP_LOGE(TAG, "setup failed: %s; receiver off", esp_err_to_name(err));
+        ESP_LOGE(TAG, "setup failed: %s; link off", esp_err_to_name(err));
         return;
     }
-    if (xTaskCreate(rx_task, "station_rx", 4096, NULL, TASK_PRIORITY, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "no task; receiver off");
+    if (xTaskCreate(rx_task, "outdoor_link", 4096, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "no task; link off");
         esp_now_deinit();
         return;
     }
-    ESP_LOGI(TAG, "listening for station " MACSTR ", interval %d s", MAC2STR(s_peer),
-             CONFIG_STATION_RX_INTERVAL_S);
+    ESP_LOGI(TAG, "listening for the outdoor unit " MACSTR ", interval %d s", MAC2STR(s_peer),
+             CONFIG_OUTDOOR_LINK_INTERVAL_S);
 }
 
 #else
 
-void station_rx_start(void)
+void outdoor_link_start(void)
 {
     ESP_LOGI(TAG, "disabled (no pairing in this build)");
 }

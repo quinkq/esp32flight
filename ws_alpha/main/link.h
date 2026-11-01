@@ -6,7 +6,7 @@
 #include "config.h"
 #include "ws_link.h"
 
-/* Wi-Fi (station mode, never connected) and ESP-NOW with the display as
+/* Wi-Fi (client mode, never connected) and ESP-NOW with the display as
  * the encrypted peer, on the cached channel. */
 bool link_start(const config_pairing_t *pairing);
 

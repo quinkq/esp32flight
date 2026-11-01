@@ -1,0 +1,48 @@
+menu "Outdoor unit link"
+
+    config OUTDOOR_LINK_ENABLED
+        bool "Link to the outdoor unit (ws_alpha)"
+        default n
+        help
+            Off in public builds. The pairing (the outdoor unit's MAC and the
+            two keys) comes from a config fragment kept outside the repository.
+
+    config OUTDOOR_LINK_PEER_MAC
+        string "Outdoor unit's MAC (aa:bb:cc:dd:ee:ff)"
+        depends on OUTDOOR_LINK_ENABLED
+        default ""
+
+    config OUTDOOR_LINK_PMK
+        string "PMK, 32 hex digits"
+        depends on OUTDOOR_LINK_ENABLED
+        default ""
+
+    config OUTDOOR_LINK_LMK
+        string "LMK, 32 hex digits"
+        depends on OUTDOOR_LINK_ENABLED
+        default ""
+
+    choice OUTDOOR_LINK_INTERVAL
+        prompt "Outdoor unit's measurement interval (sent in every reply)"
+        depends on OUTDOOR_LINK_ENABLED
+        default OUTDOOR_LINK_INTERVAL_900
+        help
+            The display decides the outdoor unit's interval: it goes out with
+            every reply, and the outdoor unit uses it from its next wake on.
+            Must divide 900 s, the display's storage grid.
+
+        config OUTDOOR_LINK_INTERVAL_60
+            bool "1 minute (bench)"
+        config OUTDOOR_LINK_INTERVAL_300
+            bool "5 minutes"
+        config OUTDOOR_LINK_INTERVAL_900
+            bool "15 minutes"
+    endchoice
+
+    config OUTDOOR_LINK_INTERVAL_S
+        int
+        default 60 if OUTDOOR_LINK_INTERVAL_60
+        default 300 if OUTDOOR_LINK_INTERVAL_300
+        default 900
+
+endmenu

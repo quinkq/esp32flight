@@ -2,8 +2,8 @@
  * Settings in NVS. The pairing (namespace "ws_link") comes from a secrets
  * image flashed once (secrets/flash-ws_alpha.ps1 in the workspace, outside
  * the repo), so neither the repo nor any firmware image carries a key. The
- * station itself only writes its cached channel (namespace "ws_alpha"), and
- * only when it changes.
+ * outdoor unit itself only writes its cached channel (namespace "ws_alpha"),
+ * and only when it changes.
  */
 #include "config.h"
 
@@ -14,7 +14,7 @@
 static const char *TAG = "config";
 
 #define NS_PAIRING "ws_link"
-#define NS_STATION "ws_alpha"
+#define NS_OWN     "ws_alpha"
 
 bool config_init(void)
 {
@@ -49,7 +49,7 @@ uint8_t config_load_channel(void)
 {
     nvs_handle_t h;
     uint8_t channel = 0;
-    if (nvs_open(NS_STATION, NVS_READONLY, &h) == ESP_OK) {
+    if (nvs_open(NS_OWN, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_u8(h, "channel", &channel);
         nvs_close(h);
     }
@@ -59,7 +59,7 @@ uint8_t config_load_channel(void)
 void config_save_channel(uint8_t channel)
 {
     nvs_handle_t h;
-    if (nvs_open(NS_STATION, NVS_READWRITE, &h) != ESP_OK) {
+    if (nvs_open(NS_OWN, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
     if (nvs_set_u8(h, "channel", channel) != ESP_OK || nvs_commit(h) != ESP_OK) {

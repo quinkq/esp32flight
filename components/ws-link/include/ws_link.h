@@ -1,13 +1,13 @@
 /*
- * ws-link: the radio protocol between the ws_alpha outdoor station and the
- * display. Both firmwares include this header, so the two sides can't drift
- * apart.
+ * ws-link: the radio protocol between the outdoor unit (ESP32-C3, firmware
+ * ws_alpha) and the display (the 7B). Both firmwares include this header,
+ * so the two sides can't drift apart.
  *
  *  - ESP-NOW unicast between two configured peers, encrypted (PMK + LMK).
  *    The encryption also authenticates every frame, so there's no CRC.
  *  - Payload at most 250 bytes (ESP-NOW v1), little-endian, packed structs,
  *    integers only.
- *  - The station sends READINGS (its backlog, oldest first); the display
+ *  - The outdoor unit sends READINGS (its backlog, oldest first); the display
  *    takes the records into RAM, answers with a REPLY echoing the seq, then
  *    writes them to flash.
  *
@@ -28,8 +28,8 @@
 
 /* ws_link_hdr_t.type */
 enum {
-    WS_LINK_READINGS = 1,                  /* station -> display */
-    WS_LINK_REPLY    = 2,                  /* display -> station */
+    WS_LINK_READINGS = 1,                  /* outdoor unit -> display */
+    WS_LINK_REPLY    = 2,                  /* display -> outdoor unit */
 };
 
 /* ws_link_record_t.flags: a value is valid only with its flag set */
@@ -41,10 +41,10 @@ enum {
 #define WS_LINK_NO_U16             UINT16_MAX
 
 /* ws_link_readings_t.flags */
-#define WS_ST_CLOCK_SYNCED         (1u << 0)  /* clock set by the display since power-on */
-#define WS_ST_BACKLOG_DROPPED      (1u << 1)  /* oldest unsent records were discarded */
-#define WS_ST_LOW_BATTERY          (1u << 2)  /* reduced mode: radio every 4th wake */
-#define WS_ST_OTA_FAILED           (1u << 3)  /* the last OTA attempt failed */
+#define WS_OUTDOOR_CLOCK_SYNCED    (1u << 0)  /* clock set by the display since power-on */
+#define WS_OUTDOOR_BACKLOG_DROPPED (1u << 1)  /* oldest unsent records were discarded */
+#define WS_OUTDOOR_LOW_BATTERY     (1u << 2)  /* reduced mode: radio every 4th wake */
+#define WS_OUTDOOR_OTA_FAILED      (1u << 3)  /* the last OTA attempt failed */
 
 /* ws_link_reply_t.cmd */
 enum {
@@ -61,7 +61,7 @@ typedef struct __attribute__((packed)) {
 
 /* one measurement */
 typedef struct __attribute__((packed)) {
-    uint32_t ts;               /* station clock at measurement, Unix seconds */
+    uint32_t ts;               /* outdoor unit's clock at measurement, Unix seconds */
     int16_t  sht_t;            /* SHT40 temperature, 0.01 °C */
     uint16_t sht_rh;           /* SHT40 humidity, 0.01 %RH */
     int16_t  bme_t;            /* BME280 temperature, 0.01 °C */
@@ -71,13 +71,13 @@ typedef struct __attribute__((packed)) {
     uint8_t  flags;            /* WS_REC_* */
 } ws_link_record_t;
 
-/* station -> display */
+/* outdoor unit -> display */
 typedef struct __attribute__((packed)) {
     ws_link_hdr_t hdr;         /* type = WS_LINK_READINGS */
-    uint32_t station_now;      /* station clock when the frame was sent */
-    uint16_t fw_build;         /* station firmware build number */
+    uint32_t outdoor_now;      /* outdoor unit's clock when the frame was sent */
+    uint16_t fw_build;         /* outdoor unit's firmware build number */
     uint8_t  reset_reason;     /* esp_reset_reason() of the current boot */
-    uint8_t  flags;            /* WS_ST_* */
+    uint8_t  flags;            /* WS_OUTDOOR_* */
     /* counters since the display last acknowledged a frame (MAC-level ack,
      * not the reply: a lost reply mustn't report the same wakes twice); a
      * later frame in the same wake carries zeros */
@@ -91,7 +91,7 @@ typedef struct __attribute__((packed)) {
 
 #define WS_LINK_READINGS_SIZE(n) (sizeof(ws_link_readings_t) + (n) * sizeof(ws_link_record_t))
 
-/* display -> station */
+/* display -> outdoor unit */
 typedef struct __attribute__((packed)) {
     ws_link_hdr_t hdr;         /* type = WS_LINK_REPLY, seq echoed */
     uint32_t unix_now;         /* display clock (NTP), UTC seconds */

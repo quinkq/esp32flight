@@ -13,5 +13,5 @@ typedef enum {
 uint16_t battery_read_mv(void);
 
 /* The mode for this wake. An unknown voltage counts as OK, so a broken
- * divider shows up on the display instead of silencing the station. */
+ * divider shows up on the display instead of silencing the outdoor unit. */
 battery_mode_t battery_mode(uint16_t mv);

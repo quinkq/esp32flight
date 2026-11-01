@@ -2,7 +2,7 @@
  * The radio side of ws-link (see PROTOCOL.md in the planning notes).
  *
  * The display's radio sits on its access point's channel, which the router
- * may change. The station has no SSID to scan for; it uses the MAC-level
+ * may change. The outdoor unit has no SSID to scan for; it uses the MAC-level
  * acknowledgement of ESP-NOW instead: a frame the display heard is acked on
  * that channel. Order per wake: the cached channel (twice), then channels
  * 1-13. After 4 failed searches in a row, only every 4th wake searches, so

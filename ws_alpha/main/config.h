@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 typedef struct {
-    uint8_t peer_mac[6];       /* the display's Wi-Fi station MAC */
+    uint8_t peer_mac[6];       /* the display's Wi-Fi MAC (client interface) */
     uint8_t pmk[16];
     uint8_t lmk[16];
 } config_pairing_t;

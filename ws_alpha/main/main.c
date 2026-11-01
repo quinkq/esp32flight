@@ -1,5 +1,6 @@
 /*
- * ws_alpha: the solar outdoor station. One linear wake cycle, no tasks:
+ * ws_alpha: the firmware of the outdoor unit (solar, ESP32-C3). One linear
+ * wake cycle, no tasks:
  *
  *   guard (brownout reset? sleep) -> battery -> sensors -> backlog
  *     -> radio (if the battery and the pairing allow it) -> deep sleep
@@ -84,20 +85,20 @@ static size_t build_frame(uint8_t *buf, uint16_t seq, battery_mode_t mode, uint1
 
     uint8_t flags = 0;
     if (power_clock_synced()) {
-        flags |= WS_ST_CLOCK_SYNCED;
+        flags |= WS_OUTDOOR_CLOCK_SYNCED;
     }
     if (backlog_dropped()) {
-        flags |= WS_ST_BACKLOG_DROPPED;
+        flags |= WS_OUTDOOR_BACKLOG_DROPPED;
     }
     if (mode == BATTERY_LOW) {
-        flags |= WS_ST_LOW_BATTERY;
+        flags |= WS_OUTDOOR_LOW_BATTERY;
     }
 
     f->hdr.magic = WS_LINK_MAGIC;
     f->hdr.version = WS_LINK_VERSION;
     f->hdr.type = WS_LINK_READINGS;
     f->hdr.seq = seq;
-    f->station_now = (uint32_t)time(NULL);
+    f->outdoor_now = (uint32_t)time(NULL);
     f->fw_build = (uint16_t)atoi(esp_app_get_description()->version);
     f->reset_reason = (uint8_t)esp_reset_reason();
     f->flags = flags;

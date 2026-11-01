@@ -1,5 +1,5 @@
 # ws_alpha, 4 MB flash: two OTA slots with rollback. Keep nvs where it is:
-# the station's secrets are flashed there as a separate image.
+# the outdoor unit's secrets are flashed there as a separate image.
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x6000
 otadata,  data, ota,     0xf000,   0x2000

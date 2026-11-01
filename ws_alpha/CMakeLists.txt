@@ -1,11 +1,12 @@
-# ws_alpha: the solar outdoor station (ESP32-C3). A separate ESP-IDF project
-# inside the esp32flight repo; it shares only the ws-link protocol header.
+# ws_alpha: the firmware of the outdoor unit (solar, ESP32-C3). A separate
+# ESP-IDF project inside the esp32flight repo; it shares only the ws-link
+# protocol header.
 cmake_minimum_required(VERSION 3.16)
 
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../components/ws-link")
 
-# The station's firmware build number: shown at boot, sent to the display as
-# fw_build. Bump it by hand for every image that goes to the station (OTA
+# The outdoor unit's firmware build number: shown at boot, sent to the display
+# as fw_build. Bump it by hand for every image that goes to the outdoor unit (OTA
 # relies on it changing). Without this, ESP-IDF would use the repo's git
 # version, which belongs to esp32flight.
 set(PROJECT_VER "2")

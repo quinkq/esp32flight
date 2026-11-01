@@ -6,9 +6,9 @@
  *    pull-up, which otherwise lights the LED while awake.
  *  - Brownout guard: a brownout reset starts nothing that draws current.
  *    It deep-sleeps instead, longer after each brownout in a row, so a weak
- *    supply can't keep the station looping at ~70 mA until the cell is
+ *    supply can't keep the outdoor unit looping at ~70 mA until the cell is
  *    empty (that's how the previous cell died).
- *  - Hard cap: whatever hangs, the station is asleep 3 s after boot.
+ *  - Hard cap: whatever hangs, the outdoor unit is asleep 3 s after boot.
  *  - Wakes are aligned to multiples of the interval (:00, :15, ...); the
  *    display can change the interval and sets the clock.
  *  - Counts for the display, since it last acknowledged a frame: brownouts,
