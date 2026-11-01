@@ -14,6 +14,10 @@
  *    comes later, and after the reply: records into RAM, the reply, then the
  *    flash write, so the outdoor unit's 100 ms wait for the reply never
  *    depends on the file system (a crash in between loses that frame).
+ *  - The same task keeps the outdoor unit's health (outdoor_health.c) and
+ *    does its housekeeping every 30 s, and about a second after the last
+ *    frame of a burst: a catch-up sends its next frame right after our
+ *    reply, so nothing slow runs in between.
  */
 #include "outdoor_link.h"
 
@@ -33,10 +37,13 @@ static const char *TAG = "outdoor_link";
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "outdoor_health.h"
 #include "ws_link.h"
 
-#define CLOCK_VALID_FROM 1767225600   /* 2026-01-01: earlier means no NTP time yet */
 #define TASK_PRIORITY    5            /* above the app's tasks (3-4): the outdoor unit waits 100 ms */
+#define TASK_STACK       6144         /* internal RAM; the daily summary logs how much is unused */
+#define HOUSEKEEPING_MS  30000
+#define BURST_MS         1000         /* quiet this long after a frame: the burst is over */
 
 typedef struct {
     uint8_t data[WS_LINK_MAX_PAYLOAD];
@@ -83,6 +90,12 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
     xQueueSend(s_rx, &item, 0);
 }
 
+/* the MAC-level acknowledgement of our reply: the outdoor unit heard it */
+static void on_sent(const esp_now_send_info_t *info, esp_now_send_status_t status)
+{
+    outdoor_health_reply_sent(status == ESP_NOW_SEND_SUCCESS);
+}
+
 static void reply(uint16_t seq)
 {
     const time_t now = time(NULL);
@@ -124,16 +137,22 @@ static void handle(const rx_item_t *item)
     ws_link_readings_t f;   /* the fixed part; the records follow it */
     if (item->len < sizeof(f)) {
         ESP_LOGW(TAG, "%u-byte frame: too short", item->len);
+        outdoor_health_rejected("a frame too short for ws-link");
         return;
     }
     memcpy(&f, item->data, sizeof(f));
     if (f.hdr.magic != WS_LINK_MAGIC || f.hdr.version != WS_LINK_VERSION || f.hdr.type != WS_LINK_READINGS) {
         ESP_LOGW(TAG, "not a ws-link v%d READINGS frame (magic 0x%04x, version %u, type %u)",
                  WS_LINK_VERSION, f.hdr.magic, f.hdr.version, f.hdr.type);
+        char why[64];
+        snprintf(why, sizeof(why), "not a ws-link v%d READINGS frame (version %u, type %u)",
+                 WS_LINK_VERSION, f.hdr.version, f.hdr.type);
+        outdoor_health_rejected(why);
         return;
     }
     if (f.count < 1 || f.count > WS_LINK_MAX_RECORDS || item->len != WS_LINK_READINGS_SIZE(f.count)) {
         ESP_LOGW(TAG, "seq %u: %u records in %u bytes don't fit", f.hdr.seq, f.count, item->len);
+        outdoor_health_rejected("its readings don't fit the frame's size");
         return;
     }
 
@@ -163,15 +182,22 @@ static void handle(const rx_item_t *item)
     ws_link_record_t newest;
     memcpy(&newest, item->data + sizeof(f) + (f.count - 1) * sizeof(newest), sizeof(newest));
     log_record(&newest);
+
+    outdoor_health_frame(&f, item->data + sizeof(f), item->rssi, accept);
 }
 
 static void rx_task(void *arg)
 {
     rx_item_t item;
+    TickType_t wait = pdMS_TO_TICKS(HOUSEKEEPING_MS);
     for (;;) {
-        if (xQueueReceive(s_rx, &item, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_rx, &item, wait) == pdTRUE) {
             handle(&item);
+            wait = pdMS_TO_TICKS(BURST_MS);
+            continue;
         }
+        outdoor_health_tick();
+        wait = pdMS_TO_TICKS(HOUSEKEEPING_MS);
     }
 }
 
@@ -200,12 +226,14 @@ void outdoor_link_start(void)
         (err = esp_now_init()) != ESP_OK ||
         (err = esp_now_set_pmk(pmk)) != ESP_OK ||
         (err = esp_now_add_peer(&peer)) != ESP_OK ||
-        (err = esp_now_register_recv_cb(on_recv)) != ESP_OK) {
+        (err = esp_now_register_recv_cb(on_recv)) != ESP_OK ||
+        (err = esp_now_register_send_cb(on_sent)) != ESP_OK) {
         ESP_LOGE(TAG, "setup failed: %s; link off", esp_err_to_name(err));
         return;
     }
-    if (xTaskCreate(rx_task, "outdoor_link", 4096, NULL, TASK_PRIORITY, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "no task; link off");
+    if (!outdoor_health_init(CONFIG_OUTDOOR_LINK_INTERVAL_S) ||
+        xTaskCreate(rx_task, "outdoor_link", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "no memory for the task; link off");
         esp_now_deinit();
         return;
     }
