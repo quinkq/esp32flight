@@ -105,15 +105,18 @@ static void reply(uint16_t seq)
 
 static void log_record(const ws_link_record_t *r)
 {
-    char sht[32] = "missing", bme[48] = "missing";
+    char sht[32] = "missing", bme[48] = "missing", bat[16] = "unknown";
     if (r->flags & WS_REC_SHT_OK) {
         snprintf(sht, sizeof(sht), "%.2f C %.2f %%", r->sht_t / 100.0, r->sht_rh / 100.0);
     }
     if (r->flags & WS_REC_BME_OK) {
         snprintf(bme, sizeof(bme), "%.2f C %.2f %% %.1f hPa", r->bme_t / 100.0, r->bme_rh / 100.0, r->bme_p / 10.0);
     }
-    ESP_LOGI(TAG, "  newest (ts %lu): SHT40 %s | BME280 %s | battery %u mV",
-             (unsigned long)r->ts, sht, bme, r->bat_mv);
+    if (r->bat_mv != WS_LINK_NO_U16) {
+        snprintf(bat, sizeof(bat), "%u mV", r->bat_mv);
+    }
+    ESP_LOGI(TAG, "  newest (ts %lu): SHT40 %s | BME280 %s | battery %s",
+             (unsigned long)r->ts, sht, bme, bat);
 }
 
 static void handle(const rx_item_t *item)
@@ -134,13 +137,29 @@ static void handle(const rx_item_t *item)
         return;
     }
 
-    reply(f.hdr.seq);
+    /* Without our own time, the records of an outdoor unit whose clock isn't
+     * synced either can't be dated: no reply, so it keeps them and sends them
+     * again next wake. Its counters restart on the acknowledgement all the
+     * same, so the frame is logged either way. */
+    const time_t now = time(NULL);
+    const bool have_time = now >= CLOCK_VALID_FROM;
+    const bool accept = have_time || (f.flags & WS_OUTDOOR_CLOCK_SYNCED);
+    if (accept) {
+        reply(f.hdr.seq);
+    }
 
-    const long offset = (long)(time(NULL) - (time_t)f.outdoor_now);
-    ESP_LOGI(TAG, "seq %u: %u records, fw %u, reset %u, flags 0x%02x, clock offset %ld s, rssi %d dBm",
+    char offset[24] = "unknown (no time yet)";
+    if (have_time) {
+        snprintf(offset, sizeof(offset), "%ld s", (long)(now - (time_t)f.outdoor_now));
+    }
+    ESP_LOGI(TAG, "seq %u: %u records, fw %u, reset %u, flags 0x%02x, clock offset %s, rssi %d dBm",
              f.hdr.seq, f.count, f.fw_build, f.reset_reason, f.flags, offset, item->rssi);
     ESP_LOGI(TAG, "  since the last ack: awake %lu ms, brownouts %u, resets %u, failed searches %u",
              (unsigned long)f.awake_total_ms, f.brownouts, f.resets, f.failed_searches);
+    if (!accept) {
+        ESP_LOGW(TAG, "  no reply: no time yet and the outdoor unit's clock isn't synced, so these "
+                      "records can't be dated; they come again next wake");
+    }
     ws_link_record_t newest;
     memcpy(&newest, item->data + sizeof(f) + (f.count - 1) * sizeof(newest), sizeof(newest));
     log_record(&newest);
