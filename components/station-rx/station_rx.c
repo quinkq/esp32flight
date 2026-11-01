@@ -9,8 +9,9 @@
  *    access point's beacons and misses the station's frames.
  *  - The receive callback runs in the Wi-Fi task and only queues the frame.
  *    A small task checks it, replies (clock, interval) and logs it. Storage
- *    comes later; once it exists, the reply has to wait until the records
- *    are stored, since the reply is what makes the station drop them.
+ *    comes later, and after the reply: records into RAM, the reply, then the
+ *    flash write, so the station's 100 ms wait for the reply never depends
+ *    on the file system (a crash in between loses that frame).
  */
 #include "station_rx.h"
 
@@ -134,10 +135,10 @@ static void handle(const rx_item_t *item)
     reply(f.hdr.seq);
 
     const long offset = (long)(time(NULL) - (time_t)f.station_now);
-    ESP_LOGI(TAG, "seq %u: %u records, fw %u, reset %u, flags 0x%02x, brownouts %u, "
-             "last wake %u ms, clock offset %ld s, rssi %d dBm",
-             f.hdr.seq, f.count, f.fw_build, f.reset_reason, f.flags, f.brownouts,
-             f.last_awake_ms, offset, item->rssi);
+    ESP_LOGI(TAG, "seq %u: %u records, fw %u, reset %u, flags 0x%02x, clock offset %ld s, rssi %d dBm",
+             f.hdr.seq, f.count, f.fw_build, f.reset_reason, f.flags, offset, item->rssi);
+    ESP_LOGI(TAG, "  since the last ack: awake %lu ms, brownouts %u, resets %u, failed searches %u",
+             (unsigned long)f.awake_total_ms, f.brownouts, f.resets, f.failed_searches);
     ws_link_record_t newest;
     memcpy(&newest, item->data + sizeof(f) + (f.count - 1) * sizeof(newest), sizeof(newest));
     log_record(&newest);

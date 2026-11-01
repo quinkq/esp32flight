@@ -11,6 +11,8 @@
  *  - Hard cap: whatever hangs, the station is asleep 3 s after boot.
  *  - Wakes are aligned to multiples of the interval (:00, :15, ...); the
  *    display can change the interval and sets the clock.
+ *  - Counts for the display, since it last acknowledged a frame: brownouts,
+ *    other resets, time awake. Failed wakes are reported this way too.
  */
 #include "power.h"
 
@@ -42,15 +44,29 @@ static const uint32_t k_backoff_s[] = { 10, 60, 600, 3600 };
 typedef struct {
     uint32_t magic;
     uint8_t  in_a_row;         /* brownouts without a clean wake in between */
-    uint8_t  since_exchange;   /* reported to the display */
     bool     clock_synced;
     uint16_t interval_s;
-    uint16_t last_awake_ms;
+    /* reported to the display; restart when it acknowledges a frame */
+    uint8_t  brownouts;
+    uint8_t  resets;
+    uint32_t awake_total_ms;
 } power_state_t;
 
 #define STATE_MAGIC (MAGIC_BASE ^ (uint32_t)sizeof(power_state_t))
 
 static RTC_NOINIT_ATTR power_state_t s_state;
+
+static void count_up(uint8_t *n)
+{
+    if (*n < UINT8_MAX) {
+        (*n)++;
+    }
+}
+
+static void add_awake(uint32_t ms)
+{
+    s_state.awake_total_ms = ms > UINT32_MAX - s_state.awake_total_ms ? UINT32_MAX : s_state.awake_total_ms + ms;
+}
 
 static void leds_off(void)
 {
@@ -83,7 +99,7 @@ static uint64_t us_to_next_slot(void)
 static void hard_cap_cb(void *arg)
 {
     ESP_LOGW(TAG, "hard cap: still awake after %d ms, forcing sleep", HARD_CAP_MS);
-    s_state.last_awake_ms = HARD_CAP_MS;
+    add_awake(HARD_CAP_MS);
     esp_deep_sleep(us_to_next_slot());
 }
 
@@ -100,16 +116,16 @@ void power_begin(void)
     }
 
     if (reason == ESP_RST_BROWNOUT) {
-        if (s_state.in_a_row < UINT8_MAX) {
-            s_state.in_a_row++;
-        }
-        if (s_state.since_exchange < UINT8_MAX) {
-            s_state.since_exchange++;
-        }
+        count_up(&s_state.in_a_row);
+        count_up(&s_state.brownouts);
         const size_t step = s_state.in_a_row <= BACKOFF_STEPS ? s_state.in_a_row - 1 : BACKOFF_STEPS - 1;
         ESP_LOGW(TAG, "brownout reset, %u in a row: sleeping %" PRIu32 " s",
                  s_state.in_a_row, k_backoff_s[step]);
         esp_deep_sleep((uint64_t)k_backoff_s[step] * 1000000);
+    }
+    if (reason != ESP_RST_POWERON && reason != ESP_RST_DEEPSLEEP) {
+        count_up(&s_state.resets);
+        ESP_LOGW(TAG, "reset (reason %d), %u since the display last heard us", reason, s_state.resets);
     }
 
     const esp_timer_create_args_t args = { .callback = hard_cap_cb, .name = "hard_cap" };
@@ -122,12 +138,24 @@ void power_begin(void)
 
 uint8_t power_brownouts(void)
 {
-    return s_state.since_exchange;
+    return s_state.brownouts;
 }
 
-void power_exchange_done(void)
+uint8_t power_resets(void)
 {
-    s_state.since_exchange = 0;
+    return s_state.resets;
+}
+
+uint32_t power_awake_total_ms(void)
+{
+    return s_state.awake_total_ms;
+}
+
+void power_frame_acked(void)
+{
+    s_state.brownouts = 0;
+    s_state.resets = 0;
+    s_state.awake_total_ms = 0;
 }
 
 int64_t power_set_clock(uint32_t unix_now)
@@ -164,16 +192,11 @@ uint16_t power_interval(void)
     return s_state.interval_s;
 }
 
-uint16_t power_last_awake_ms(void)
-{
-    return s_state.last_awake_ms;
-}
-
 void power_sleep(void)
 {
     s_state.in_a_row = 0;
     const int64_t awake_ms = esp_timer_get_time() / 1000;
-    s_state.last_awake_ms = awake_ms > UINT16_MAX ? UINT16_MAX : (uint16_t)awake_ms;
+    add_awake((uint32_t)awake_ms);
     const uint64_t sleep_us = us_to_next_slot();
     /* esp_timer starts after the ROM and the bootloader (~0.1-0.3 s), so this
      * undercounts the whole wake by about that much */

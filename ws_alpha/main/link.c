@@ -192,12 +192,12 @@ static bool find_display(const void *frame, size_t len)
     return false;
 }
 
-bool link_transfer(const void *frame, size_t len, uint16_t seq, ws_link_reply_t *reply)
+link_result_t link_transfer(const void *frame, size_t len, uint16_t seq, ws_link_reply_t *reply)
 {
     xQueueReset(s_replies);
     const bool acked = s_on_channel ? send_frame(frame, len) : find_display(frame, len);
     if (!acked) {
-        return false;
+        return LINK_NOT_HEARD;
     }
 
     const int64_t deadline = esp_timer_get_time() + (int64_t)REPLY_TIMEOUT_MS * 1000;
@@ -208,11 +208,16 @@ bool link_transfer(const void *frame, size_t len, uint16_t seq, ws_link_reply_t 
         if (item.reply.hdr.seq == seq) {
             memcpy(reply, &item.reply, sizeof(*reply));
             s_last_rssi = item.rssi;
-            return true;
+            return LINK_REPLY;
         }
     }
     ESP_LOGW(TAG, "acked but no reply to seq %u within %d ms", seq, REPLY_TIMEOUT_MS);
-    return false;
+    return LINK_NO_REPLY;
+}
+
+uint8_t link_failed_searches(void)
+{
+    return s_state.failed_searches;
 }
 
 uint8_t link_channel(void)

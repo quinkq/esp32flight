@@ -8,7 +8,8 @@
  *  - Payload at most 250 bytes (ESP-NOW v1), little-endian, packed structs,
  *    integers only.
  *  - The station sends READINGS (its backlog, oldest first); the display
- *    stores the records, then answers with a REPLY echoing the seq.
+ *    takes the records into RAM, answers with a REPLY echoing the seq, then
+ *    writes them to flash.
  *
  * Packed members can be unaligned: build frames in a buffer and copy whole
  * structs with memcpy() rather than taking pointers to single fields.
@@ -19,7 +20,7 @@
 #include <stdint.h>
 
 #define WS_LINK_MAGIC              0x5357  /* bytes 'W','S' on the wire */
-#define WS_LINK_VERSION            2
+#define WS_LINK_VERSION            3
 
 #define WS_LINK_MAX_PAYLOAD        250     /* ESP-NOW v1 */
 #define WS_LINK_MAX_RECORDS        13      /* per READINGS frame */
@@ -77,8 +78,13 @@ typedef struct __attribute__((packed)) {
     uint16_t fw_build;         /* station firmware build number */
     uint8_t  reset_reason;     /* esp_reset_reason() of the current boot */
     uint8_t  flags;            /* WS_ST_* */
-    uint8_t  brownouts;        /* brownout resets since the last successful exchange, saturating */
-    uint16_t last_awake_ms;    /* length of the previous wake cycle */
+    /* counters since the display last acknowledged a frame (MAC-level ack,
+     * not the reply: a lost reply mustn't report the same wakes twice); a
+     * later frame in the same wake carries zeros */
+    uint32_t awake_total_ms;   /* summed wake lengths; the current wake isn't finished, so not included */
+    uint8_t  brownouts;        /* brownout resets, saturating */
+    uint8_t  resets;           /* other resets but power-on and deep-sleep wakes (panic, watchdog, ...), saturating */
+    uint8_t  failed_searches;  /* channel searches that found nothing, saturating */
     uint8_t  count;            /* records that follow, 1..WS_LINK_MAX_RECORDS */
     ws_link_record_t rec[];    /* oldest first */
 } ws_link_readings_t;
@@ -103,7 +109,7 @@ typedef struct __attribute__((packed)) {
 /* the wire format: any change here is a protocol change (bump the version) */
 _Static_assert(sizeof(ws_link_hdr_t) == 6, "ws_link_hdr_t must be 6 bytes");
 _Static_assert(sizeof(ws_link_record_t) == 17, "ws_link_record_t must be 17 bytes");
-_Static_assert(sizeof(ws_link_readings_t) == 18, "ws_link_readings_t header must be 18 bytes");
+_Static_assert(sizeof(ws_link_readings_t) == 22, "ws_link_readings_t header must be 22 bytes");
 _Static_assert(WS_LINK_READINGS_SIZE(WS_LINK_MAX_RECORDS) <= WS_LINK_MAX_PAYLOAD,
                "a full READINGS frame must fit one ESP-NOW payload");
 _Static_assert(WS_LINK_REPLY_SIZE == 13, "REPLY without OTA must be 13 bytes");

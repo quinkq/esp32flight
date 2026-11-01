@@ -7,11 +7,16 @@
  * reset it deep-sleeps and never returns), hard-cap timer. */
 void power_begin(void);
 
-/* Brownout resets since the last successful exchange, saturating at 255. */
+/* Reported to the display, each since it last acknowledged a frame: brownout
+ * resets and other resets (not power-on or deep-sleep wakes), both saturating
+ * at 255, and the summed length of the wakes (app start to sleep), the
+ * current one not included. */
 uint8_t power_brownouts(void);
+uint8_t power_resets(void);
+uint32_t power_awake_total_ms(void);
 
-/* A successful exchange: the brownout count has been reported. */
-void power_exchange_done(void);
+/* The display acknowledged a frame carrying the counts above: they restart. */
+void power_frame_acked(void);
 
 /* Sets the clock from the display; returns new minus old, in seconds. From
  * then on the clock counts as synced until the next power-on. */
@@ -22,9 +27,6 @@ bool power_clock_synced(void);
  * and divides 900 (the display's 15-minute grid). */
 void power_set_interval(uint16_t interval_s);
 uint16_t power_interval(void);
-
-/* Length of the previous wake, ms (app start to sleep). */
-uint16_t power_last_awake_ms(void);
 
 /* End of a normal wake: deep sleep until the next aligned slot. */
 void power_sleep(void) __attribute__((noreturn));

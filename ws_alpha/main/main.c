@@ -101,15 +101,16 @@ static size_t build_frame(uint8_t *buf, uint16_t seq, battery_mode_t mode, uint1
     f->fw_build = (uint16_t)atoi(esp_app_get_description()->version);
     f->reset_reason = (uint8_t)esp_reset_reason();
     f->flags = flags;
+    f->awake_total_ms = power_awake_total_ms();
     f->brownouts = power_brownouts();
-    f->last_awake_ms = power_last_awake_ms();
+    f->resets = power_resets();
+    f->failed_searches = link_failed_searches();
     f->count = (uint8_t)*count;
     return WS_LINK_READINGS_SIZE(*count);
 }
 
 static void apply_reply(const ws_link_reply_t *r)
 {
-    power_exchange_done();
     backlog_clear_dropped();
 
     if (r->unix_now >= CLOCK_VALID_FROM) {
@@ -144,7 +145,11 @@ static void exchange(battery_mode_t mode)
         const uint16_t seq = ++s_seq;
         const size_t len = build_frame(buf, seq, mode, &count);
         ws_link_reply_t reply;
-        if (!link_transfer(buf, len, seq, &reply)) {
+        const link_result_t res = link_transfer(buf, len, seq, &reply);
+        if (res != LINK_NOT_HEARD) {
+            power_frame_acked();   /* the display has this frame's counts */
+        }
+        if (res != LINK_REPLY) {
             break;
         }
         backlog_drop(count);
