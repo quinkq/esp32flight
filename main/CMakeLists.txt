@@ -57,6 +57,7 @@ idf_component_register(
         "weather.c"
         "ui.c"
         "ui_settings.c"
+        "ui_weather.c"
         "ui_map.c"
         "ui_photo.c"
         "web_server.c"
