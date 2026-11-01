@@ -27,12 +27,14 @@
 #include "ui_settings.h"
 #include "flight_model.h"
 #include "waveshare_rgb_lcd_port.h"
+#include "weather_http.h"   /* weather-station fork */
 
 static const char *TAG = "web";
 
 /* HTTP Basic Auth against the panel password (user "admin"). Empty
- * password in settings means the panel and API are open. */
-static bool auth_ok(httpd_req_t *req)
+ * password in settings means the panel and API are open.
+ * weather-station fork: not static, so weather_http.c checks the same way. */
+bool auth_ok(httpd_req_t *req)
 {
     const char *pw = settings_get()->web_pass;
     if (pw[0] == '\0') {
@@ -55,7 +57,7 @@ static bool auth_ok(httpd_req_t *req)
     return strcmp(hdr, expect) == 0;
 }
 
-static esp_err_t require_auth(httpd_req_t *req)
+esp_err_t require_auth(httpd_req_t *req)
 {
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"esp32flight\"");
@@ -1329,7 +1331,7 @@ void web_server_start(void)
 #ifndef APKFLIGHT
     config.core_id = 0;   /* keep TLS/JSON chatter off the LVGL core */
 #endif
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 28;   /* weather-station fork: was 20 */
     config.lru_purge_enable = true;
 
     httpd_handle_t server = NULL;
@@ -1359,5 +1361,6 @@ void web_server_start(void)
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(server, &uris[i]);
     }
+    weather_http_register(server);   /* weather-station fork */
     ESP_LOGI(TAG, "web panel at http://esp32flight.local/");
 }

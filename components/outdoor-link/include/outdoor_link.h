@@ -55,3 +55,8 @@ typedef struct {
 
 /* Up to max of the latest events, newest first; returns how many. */
 size_t outdoor_link_events(outdoor_event_t *out, size_t max);
+
+/* The event log, one event per line: unix time, kind, text, tab-separated.
+ * Past 64 KB the file becomes the .old one, so read both, old first. */
+#define OUTDOOR_LOG_PATH     "/assets/outdoor.tsv"
+#define OUTDOOR_LOG_OLD_PATH "/assets/outdoor.old.tsv"

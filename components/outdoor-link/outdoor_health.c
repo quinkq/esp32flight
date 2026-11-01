@@ -34,8 +34,6 @@
 
 static const char *TAG = "outdoor_link";
 
-#define LOG_PATH       "/assets/outdoor.tsv"
-#define LOG_OLD_PATH   "/assets/outdoor.old.tsv"
 #define LOG_MAX_BYTES  (64 * 1024)      /* then renamed to .old, as upstream's alerts.tsv */
 #define EVENTS         32               /* kept in RAM: the newest, and any not yet written */
 #define BACKLOG_SPAN_S (2 * 24 * 3600)  /* the outdoor unit's backlog never spans more */
@@ -167,14 +165,14 @@ static void flush_events(void)
         return;
     }
     struct stat st;
-    if (stat(LOG_PATH, &st) == 0 && st.st_size > LOG_MAX_BYTES) {
-        unlink(LOG_OLD_PATH);
-        rename(LOG_PATH, LOG_OLD_PATH);
+    if (stat(OUTDOOR_LOG_PATH, &st) == 0 && st.st_size > LOG_MAX_BYTES) {
+        unlink(OUTDOOR_LOG_OLD_PATH);
+        rename(OUTDOOR_LOG_PATH, OUTDOOR_LOG_OLD_PATH);
     }
-    FILE *f = fopen(LOG_PATH, "a");
+    FILE *f = fopen(OUTDOOR_LOG_PATH, "a");
     if (f == NULL) {
         if (!s_file_warned) {
-            ESP_LOGW(TAG, "can't open %s; events stay in RAM", LOG_PATH);
+            ESP_LOGW(TAG, "can't open %s; events stay in RAM", OUTDOOR_LOG_PATH);
             s_file_warned = true;
         }
         return;
