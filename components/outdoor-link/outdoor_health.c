@@ -69,8 +69,11 @@ static uint32_t s_interval_s;
 
 /* the link task's own */
 static day_t s_day;
-static uint32_t s_last_ts;              /* newest reading counted, outdoor clock; 0: none */
+static bool s_have_ts;
+static uint32_t s_last_ts;              /* newest reading counted, outdoor clock (0 is a real
+                                           time on it, right after a power-on) */
 static uint32_t s_last_now;             /* outdoor_now of the previous frame */
+static uint16_t s_last_seq;             /* and its seq */
 static bool s_rejecting;                /* inside a burst of rejected frames */
 static bool s_sht_ok = true, s_bme_ok = true;
 static uint8_t s_sht_run, s_bme_run;
@@ -282,10 +285,10 @@ static void sensor(const char *name, bool ok, bool *state, uint8_t *run, uint32_
 static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t gap_s,
                     uint32_t *late, uint32_t *missing)
 {
-    if (s_last_ts != 0 && r->ts <= s_last_ts && s_last_ts - r->ts <= BACKLOG_SPAN_S) {
+    if (s_have_ts && r->ts <= s_last_ts && s_last_ts - r->ts <= BACKLOG_SPAN_S) {
         return false;                   /* the outdoor unit missed our reply and sent it again */
     }
-    if (s_last_ts != 0 && r->ts > s_last_ts && r->ts - s_last_ts <= BACKLOG_SPAN_S) {
+    if (s_have_ts && r->ts > s_last_ts && r->ts - s_last_ts <= BACKLOG_SPAN_S) {
         const uint32_t step = r->ts - s_last_ts;
         if (2 * step > 3 * s_interval_s) {
             *missing += (step + s_interval_s / 2) / s_interval_s - 1;
@@ -293,6 +296,7 @@ static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t ga
     }
     /* otherwise the first reading, or a jump beyond the backlog's reach: its
      * clock changed (set after a power-on, say), and counting starts afresh */
+    s_have_ts = true;
     s_last_ts = r->ts;
 
     /* its age when sent, both times from its own clock */
@@ -343,7 +347,10 @@ void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, i
     const bool first = s_h.last_heard_us == 0;
     const bool was_silent = status_of(&s_h, now_us) == OUTDOOR_SILENT;
     const int64_t quiet_s = first ? 0 : (now_us - s_h.last_heard_us) / 1000000;
-    const bool new_wake = first || f->outdoor_now < s_last_now || f->outdoor_now - s_last_now > SAME_WAKE_S;
+    /* frames of one wake carry consecutive seqs and nearly the same time; right
+     * after a power-on its clock is near 0 again, so the time alone can't tell */
+    const bool new_wake = first || f->hdr.seq != (uint16_t)(s_last_seq + 1) ||
+                          f->outdoor_now < s_last_now || f->outdoor_now - s_last_now > SAME_WAKE_S;
     const bool synced = f->flags & WS_OUTDOOR_CLOCK_SYNCED;
     const bool low = f->flags & WS_OUTDOOR_LOW_BATTERY;
     const bool dropped = f->flags & WS_OUTDOOR_BACKLOG_DROPPED;
@@ -411,6 +418,7 @@ void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, i
         s_day.rssi_max = rssi;
     }
     s_last_now = f->outdoor_now;
+    s_last_seq = f->hdr.seq;
     s_rejecting = false;
 
     char bat[12];
