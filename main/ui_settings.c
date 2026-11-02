@@ -22,6 +22,7 @@
 #include "waveshare_rgb_lcd_port.h"
 #endif
 #include "wifi_mgr.h"
+#include "ui_weather.h"   /* weather-station fork */
 
 #include "theme.h"
 
@@ -838,6 +839,9 @@ void ui_settings_open(void)
         snprintf(netbuf, sizeof(netbuf), "IP: -    v%s", esp_app_get_description()->version);
     }
     add_label(p, netbuf, 0, nety);
+
+    /* weather-station fork: the outdoor unit's diagnostics */
+    ui_weather_settings_tab(tab_page(tv, ui_weather_tab_name()));
 
     /* keyboard on the top layer */
     s_kb = lv_keyboard_create(lv_layer_top());

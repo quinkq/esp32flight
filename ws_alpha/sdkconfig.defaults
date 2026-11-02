@@ -1,0 +1,28 @@
+# ws_alpha: Ai-Thinker ESP-C3-32S kit, 4 MB flash
+CONFIG_IDF_TARGET="esp32c3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Two 1.5 MB OTA slots, rollback on from the start (the OTA client comes later)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Short wakes: no image check after deep sleep, a quiet bootloader
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# Console on UART0 only. The USB peripheral's D+ pull-up lights the kit's
+# white LED on GPIO19, and its clock costs power. (The secondary console
+# would switch the peripheral back on.)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# CONFIG_USJ_ENABLE_USB_SERIAL_JTAG is not set
+
+# 1 ms ticks, so the short sensor waits are exact
+CONFIG_FREERTOS_HZ=1000
+
+# Console time is awake time (115200 baud, the CPU waits for the UART):
+# ESP-IDF's own messages (boot, Wi-Fi driver) only from warnings up; the
+# firmware's own modules raise themselves back to INFO in app_main.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
