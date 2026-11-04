@@ -39,6 +39,7 @@ static const char *TAG = "outdoor_link";
 #define BACKLOG_SPAN_S (2 * 24 * 3600)  /* the outdoor unit's backlog never spans more */
 #define SAME_WAKE_S    5                /* frames this close on its clock come from one wake */
 #define SENSOR_RUN     3                /* readings in a row before a sensor counts as lost or back */
+#define DRIFT_SPAN_S   3600             /* report its clock's rate after this long without a sync */
 
 typedef struct {
     int64_t up_us;                      /* esp_timer time of the event */
@@ -451,6 +452,16 @@ void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, i
     }
     if (missing != 0) {
         event("missing", "%lu readings never arrived", (unsigned long)missing);
+    }
+    /* after a long gap the offset shows how fast or slow its clock runs */
+    if (dated && synced && f->clock_set_at != 0 && f->outdoor_now > f->clock_set_at &&
+        f->outdoor_now - f->clock_set_at >= DRIFT_SPAN_S) {
+        const int64_t off = (int64_t)now - f->outdoor_now;
+        const int64_t size = off < 0 ? -off : off;
+        const uint32_t span = f->outdoor_now - f->clock_set_at;
+        event("clock", "its clock was %lld s %s after %lu h %lu min without a sync (%.2f %%)",
+              (long long)size, off < 0 ? "fast" : "slow", (unsigned long)(span / 3600),
+              (unsigned long)(span % 3600 / 60), 100.0 * (double)size / span);
     }
 }
 

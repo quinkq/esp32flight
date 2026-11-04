@@ -167,9 +167,13 @@ static void handle(const rx_item_t *item)
         reply(f.hdr.seq);
     }
 
-    char offset[24] = "unknown (no time yet)";
+    char offset[48] = "unknown (no time yet)";
     if (have_time) {
         snprintf(offset, sizeof(offset), "%ld s", (long)(now - (time_t)f.outdoor_now));
+        if (f.clock_set_at != 0) {
+            snprintf(offset + strlen(offset), sizeof(offset) - strlen(offset), " (set %lu s ago)",
+                     (unsigned long)(f.outdoor_now - f.clock_set_at));
+        }
     }
     ESP_LOGI(TAG, "seq %u: %u records, fw %u, reset %u, flags 0x%02x, clock offset %s, rssi %d dBm",
              f.hdr.seq, f.count, f.fw_build, f.reset_reason, f.flags, offset, item->rssi);

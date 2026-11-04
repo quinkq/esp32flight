@@ -99,6 +99,7 @@ static size_t build_frame(uint8_t *buf, uint16_t seq, battery_mode_t mode, uint1
     f->hdr.type = WS_LINK_READINGS;
     f->hdr.seq = seq;
     f->outdoor_now = (uint32_t)time(NULL);
+    f->clock_set_at = power_clock_set_at();
     f->fw_build = (uint16_t)atoi(esp_app_get_description()->version);
     f->reset_reason = (uint8_t)esp_reset_reason();
     f->flags = flags;
@@ -115,8 +116,9 @@ static void apply_reply(const ws_link_reply_t *r)
     backlog_clear_dropped();
 
     if (r->unix_now >= CLOCK_VALID_FROM) {
+        const uint32_t set_at = power_clock_set_at(), before = (uint32_t)time(NULL);
         const int64_t delta = power_set_clock(r->unix_now);
-        backlog_shift(delta);   /* records still waiting move with the clock */
+        backlog_shift(delta, set_at, before);   /* records still waiting move with the clock */
         if (delta > 2 || delta < -2) {
             ESP_LOGI(TAG, "clock set, moved by %lld s", delta);
         }

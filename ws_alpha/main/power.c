@@ -45,6 +45,7 @@ typedef struct {
     uint32_t magic;
     uint8_t  in_a_row;         /* brownouts without a clean wake in between */
     bool     clock_synced;
+    uint32_t clock_set_at;     /* the clock's value when the display last set it */
     uint16_t interval_s;
     /* reported to the display; restart when it acknowledges a frame */
     uint8_t  brownouts;
@@ -166,12 +167,18 @@ int64_t power_set_clock(uint32_t unix_now)
     tv = (struct timeval){ .tv_sec = unix_now };
     settimeofday(&tv, NULL);
     s_state.clock_synced = true;
+    s_state.clock_set_at = unix_now;
     return delta;
 }
 
 bool power_clock_synced(void)
 {
     return s_state.clock_synced;
+}
+
+uint32_t power_clock_set_at(void)
+{
+    return s_state.clock_synced ? s_state.clock_set_at : 0;
 }
 
 void power_set_interval(uint16_t interval_s)

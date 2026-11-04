@@ -23,6 +23,9 @@ void power_frame_acked(void);
 int64_t power_set_clock(uint32_t unix_now);
 bool power_clock_synced(void);
 
+/* The clock's value when the display last set it; 0 if not since power-on. */
+uint32_t power_clock_set_at(void);
+
 /* The measurement interval from the display. Ignored unless it's 60-900 s
  * and divides 900 (the display's 15-minute grid). */
 void power_set_interval(uint16_t interval_s);

@@ -83,12 +83,11 @@ void backlog_drop(uint16_t n)
     s_log.count -= n;
 }
 
-void backlog_shift(int64_t delta)
+void backlog_shift(int64_t delta, uint32_t set_at, uint32_t now)
 {
     for (uint16_t i = 0; i < s_log.count; i++) {
         ws_link_record_t *r = at(i);
-        const int64_t ts = (int64_t)r->ts + delta;
-        r->ts = ts < 0 ? 0 : ts > UINT32_MAX ? UINT32_MAX : (uint32_t)ts;
+        r->ts = ws_link_correct_ts(r->ts, delta, set_at, now);
     }
 }
 
