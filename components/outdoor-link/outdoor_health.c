@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -34,7 +35,10 @@
 
 static const char *TAG = "outdoor_link";
 
-#define LOG_MAX_BYTES  (64 * 1024)      /* then renamed to .old, as upstream's alerts.tsv */
+#define LOG_MAX_BYTES  (16 * 1024)      /* then renamed to .old, as upstream's alerts.tsv;
+                                           small: /assets is nearly full (DISPLAY.md, Storage) */
+#define SPACE_LOW_KB   100              /* free in /assets below this: an event */
+#define SPACE_OK_KB    150              /* and again only after it rose above this */
 #define EVENTS         32               /* kept in RAM: the newest, and any not yet written */
 #define BACKLOG_SPAN_S (2 * 24 * 3600)  /* the outdoor unit's backlog never spans more */
 #define SAME_WAKE_S    5                /* frames this close on its clock come from one wake */
@@ -77,6 +81,7 @@ static bool s_rejecting;                /* inside a burst of rejected frames */
 static bool s_sht_ok = true, s_bme_ok = true;
 static uint8_t s_sht_run, s_bme_run;
 static bool s_file_warned;
+static bool s_space_low;
 
 static bool have_time(time_t *now)
 {
@@ -331,6 +336,7 @@ bool outdoor_health_init(uint32_t interval_s)
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_h.running = true;
     s_h.expected_gap_s = interval_s;
+    s_h.assets_free_kb = -1;
     xSemaphoreGive(s_mux);
     return true;
 }
@@ -508,8 +514,20 @@ void outdoor_health_tick(void)
     const uint8_t old = s_h.channel;
     const uint8_t ch = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.primary : old;
 
+    /* free space where the event log and, later, the store live */
+    size_t total = 0, used = 0;
+    const int32_t free_kb = esp_spiffs_info("assets", &total, &used) == ESP_OK && total >= used
+                          ? (int32_t)((total - used) / 1024) : -1;
+    if (free_kb >= 0 && free_kb < SPACE_LOW_KB && !s_space_low) {
+        s_space_low = true;
+        event("space", "only %ld KB free in /assets (of %u KB)", (long)free_kb, (unsigned)(total / 1024));
+    } else if (free_kb > SPACE_OK_KB) {
+        s_space_low = false;
+    }
+
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_h.status = status;
+    s_h.assets_free_kb = free_kb;
     if (ch != old) {
         s_h.channel = ch;
         s_h.channel_changes += old != 0;

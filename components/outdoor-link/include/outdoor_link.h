@@ -42,6 +42,7 @@ typedef struct {
     uint32_t readings, twice, late, missing;
     uint8_t  channel;                  /* the display's Wi-Fi channel; 0: not connected yet */
     uint16_t channel_changes;
+    int32_t  assets_free_kb;           /* free in the /assets partition; -1: unknown */
 } outdoor_health_t;
 
 /* A copy of the current state, with the status worked out at the call. */
@@ -57,6 +58,6 @@ typedef struct {
 size_t outdoor_link_events(outdoor_event_t *out, size_t max);
 
 /* The event log, one event per line: unix time, kind, text, tab-separated.
- * Past 64 KB the file becomes the .old one, so read both, old first. */
+ * Past 16 KB the file becomes the .old one, so read both, old first. */
 #define OUTDOOR_LOG_PATH     "/assets/outdoor.tsv"
 #define OUTDOOR_LOG_OLD_PATH "/assets/outdoor.old.tsv"

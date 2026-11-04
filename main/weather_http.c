@@ -75,7 +75,8 @@ static const char OUTDOOR_HTML[] =
 "card('Sensors',ok('SHT40',f.sht_ok)+' &nbsp;'+ok('BME280',f.bme_ok))+"
 "card('Firmware','build '+f.fw_build)+"
 "card('Clock',(f.clock_synced?'synced':'not set')+(f.clock_offset_s==null?'':', '+(f.clock_offset_s>=0?'+':'')+f.clock_offset_s+' s'))+"
-"card('Channel',c.channel||'&ndash;');"
+"card('Channel',c.channel||'&ndash;')+"
+"card('Free space',d.assets_free_kb==null?'&ndash;':'<span class='+(d.assets_free_kb<100?'bad':'')+'>'+d.assets_free_kb+' KB</span>');"
 "$('frame').innerHTML='Last frame: '+f.records+' reading'+(f.records==1?'':'s')"
 "+(f.reset_reason!=8?' &middot; it started by '+(R[f.reset_reason]||'reset '+f.reset_reason):'')"
 "+(f.backlog_dropped?' &middot; <span class=bad>its backlog overflowed</span>':'')"
@@ -168,6 +169,11 @@ static esp_err_t outdoor_api_get(httpd_req_t *req)
     cJSON_AddNumberToObject(c, "twice", h.twice);
     cJSON_AddNumberToObject(c, "channel", h.channel);
     cJSON_AddNumberToObject(c, "channel_changes", h.channel_changes);
+    if (h.assets_free_kb >= 0) {
+        cJSON_AddNumberToObject(root, "assets_free_kb", h.assets_free_kb);
+    } else {
+        cJSON_AddNullToObject(root, "assets_free_kb");
+    }
 
     /* from RAM, so they show before the display has time to write them */
     cJSON *events = cJSON_AddArrayToObject(root, "events");
