@@ -25,7 +25,7 @@
  *  - Several readings in one slot (intervals of 1 or 5 minutes) give means,
  *    each value over the readings that have it. The sums for the slot being
  *    filled stay in RAM; after a display restart they're picked up from the
- *    record.
+ *    record. The indoor sensor's means come ready-made, once per slot.
  *  - Each change to a slot gets the next change number (RAM only), so a
  *    client asks for what changed since its last visit: late readings from
  *    the backlog and slots still filling included. The numbers restart at a
@@ -246,6 +246,35 @@ void readings_store_put_outdoor(const ws_link_record_t *r, uint32_t ts, int8_t r
     xSemaphoreGive(s_mux);
 }
 
+void readings_store_put_indoor(uint32_t ts, int16_t t, uint16_t rh)
+{
+    const uint32_t slot = (ts + READINGS_SLOT_S / 2) / READINGS_SLOT_S;
+    if (s_ram == NULL || slot == 0) {
+        return;
+    }
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    const uint32_t pos = slot % READINGS_SLOTS;
+    readings_slot_t *s = &s_ram[pos];
+    if (s->ts > slot * READINGS_SLOT_S) {
+        xSemaphoreGive(s_mux);
+        ESP_LOGW(TAG, "indoor mean at %lu dropped: older than the ring", (unsigned long)ts);
+        return;
+    }
+    if (s->ts != slot * READINGS_SLOT_S) {
+        *s = empty(slot);               /* no outdoor reading in it (yet) */
+    }
+    s->in_t = t;
+    s->in_rh = rh;
+    s->flags |= READINGS_INDOOR_OK;
+    s->check = check_of(s);
+    mark(pos);
+    s_changed[pos] = ++s_change;
+    if (slot > s_newest) {
+        s_newest = slot;
+    }
+    xSemaphoreGive(s_mux);
+}
+
 static bool erase(int p)
 {
     s_blank[p] = esp_partition_erase_range(s_part, (size_t)p * SECTOR, SECTOR) == ESP_OK;
@@ -360,10 +389,15 @@ bool readings_store_latest(readings_slot_t *out)
     if (s_ram == NULL) {
         return false;
     }
+    bool any = false;
     xSemaphoreTake(s_mux, portMAX_DELAY);
-    const bool any = s_newest != 0;
-    if (any) {
-        *out = s_ram[s_newest % READINGS_SLOTS];
+    /* back from the newest: the latest slots may hold indoor means only */
+    for (uint32_t slot = s_newest; !any && slot != 0 && s_newest - slot < READINGS_SLOTS; slot--) {
+        const readings_slot_t *s = &s_ram[slot % READINGS_SLOTS];
+        if (s->ts == slot * READINGS_SLOT_S && s->count != 0) {
+            *out = *s;
+            any = true;
+        }
     }
     xSemaphoreGive(s_mux);
     return any;

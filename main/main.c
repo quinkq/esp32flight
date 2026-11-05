@@ -20,6 +20,7 @@
 #include "wifi_mgr.h"
 #include "outdoor_link.h"   /* weather-station fork: link to the outdoor unit */
 #include "readings_store.h" /* weather-station fork: its readings, in RAM and their own partition */
+#include "indoor.h"         /* weather-station fork: the indoor SHT40 */
 
 static const char *TAG = "canflight";
 
@@ -74,6 +75,7 @@ void app_main(void)
     }
 
     readings_store_init();  /* weather-station fork: before outdoor_link_start() feeds it */
+    indoor_start();         /* weather-station fork */
     err = wifi_mgr_start();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Wi-Fi init failed: %s", esp_err_to_name(err));

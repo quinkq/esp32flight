@@ -56,11 +56,15 @@ void readings_store_init(void);
  * each reading once only: repeats would count twice in the means. */
 void readings_store_put_outdoor(const ws_link_record_t *r, uint32_t ts, int8_t rssi, uint8_t flags);
 
+/* The indoor sensor's mean for the slot whose start is nearest ts (0.01 °C,
+ * 0.01 %RH), once the slot is complete. */
+void readings_store_put_indoor(uint32_t ts, int16_t t, uint16_t rh);
+
 /* What changed in RAM into flash: about 60 ms per sector written. Never call
  * it while someone waits for a quick answer. */
 void readings_store_flush(void);
 
-/* A copy of the newest slot; false while there's none. */
+/* A copy of the newest slot with outdoor readings; false while there's none. */
 bool readings_store_latest(readings_slot_t *out);
 
 /* What a client has seen, as a token for URLs: "<boot>-<change>". Every

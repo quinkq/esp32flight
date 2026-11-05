@@ -6,7 +6,8 @@
  *   GET /outdoor                       a small page that refreshes itself
  *   GET /api/outdoor                   the outdoor unit as the display sees it, JSON
  *   GET /api/outdoor/events?since=T    the event log after unix time T, tab-separated
- *   GET /api/readings                  the newest stored slot (raw values) and the store's state, JSON
+ *   GET /api/readings                  the newest stored outdoor slot (raw values), the indoor
+ *                                      sensor's latest sample and the store's state, JSON
  *   GET /api/readings/history?cursor=C&since=T&fmt=json|csv|influx
  *                                      the slots changed since cursor C (none: all) with ts > T,
  *                                      oldest first; the next cursor in the X-Cursor header (and
@@ -23,6 +24,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "indoor.h"
 #include "outdoor_link.h"
 #include "readings_store.h"
 #include "web_server.h"
@@ -302,6 +304,22 @@ static esp_err_t readings_api_get(httpd_req_t *req)
     } else {
         cJSON_AddNullToObject(root, "outdoor");
     }
+
+    /* the latest sample, raw; the store has the slot means */
+    indoor_t in;
+    indoor_latest(&in);
+    cJSON *i = cJSON_AddObjectToObject(root, "indoor");
+    cJSON_AddBoolToObject(i, "answering", in.answering);
+    if (in.serial != 0) {
+        char serial[12];
+        snprintf(serial, sizeof(serial), "%08lx", (unsigned long)in.serial);
+        cJSON_AddStringToObject(i, "serial", serial);
+    } else {
+        cJSON_AddNullToObject(i, "serial");
+    }
+    add_value(i, "age_s", in.have, in.age_s);
+    add_value(i, "t", in.have, in.t / 100.0);
+    add_value(i, "rh", in.have, in.rh / 100.0);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

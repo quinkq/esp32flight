@@ -5,7 +5,8 @@
  * planning notes).
  *
  *  - The link task does all the writing: frames, rejections and the
- *    housekeeping tick. outdoor_link_health() and outdoor_link_events() hand
+ *    housekeeping tick; other tasks only add events (outdoor_link_event(),
+ *    the indoor sensor). outdoor_link_health() and outdoor_link_events() hand
  *    copies to other tasks, taken under a mutex, never in a critical section
  *    (the 7B's panel needs its interrupts).
  *  - The status runs on uptime, and the reading counters on the outdoor
@@ -578,6 +579,11 @@ void outdoor_link_health(outdoor_health_t *out)
     out->replies_unacked = __atomic_load_n(&s_unacked, __ATOMIC_RELAXED);
     out->status = status_of(out, now_us);
     out->uptime_s = (uint32_t)(now_us / 1000000);
+}
+
+void outdoor_link_event(const char *kind, const char *text)
+{
+    event(kind, "%s", text);
 }
 
 size_t outdoor_link_events(outdoor_event_t *out, size_t max)

@@ -62,6 +62,7 @@ idf_component_register(
         "ui_photo.c"
         "web_server.c"
         "weather_http.c"
+        "indoor.c"
         "font_pl_8.c"
         "font_pl_10.c"
         "font_pl_12.c"

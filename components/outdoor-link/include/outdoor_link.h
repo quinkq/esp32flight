@@ -57,6 +57,10 @@ typedef struct {
 /* Up to max of the latest events, newest first; returns how many. */
 size_t outdoor_link_events(outdoor_event_t *out, size_t max);
 
+/* An event from elsewhere in the weather station (the indoor sensor) into
+ * the same log. Any task; serial log only while the link isn't running. */
+void outdoor_link_event(const char *kind, const char *text);
+
 /* The event log, one event per line: unix time, kind, text, tab-separated.
  * Past 16 KB the file becomes the .old one, so read both, old first. */
 #define OUTDOOR_LOG_PATH     "/assets/outdoor.tsv"
