@@ -26,6 +26,11 @@
  *    each value over the readings that have it. The sums for the slot being
  *    filled stay in RAM; after a display restart they're picked up from the
  *    record.
+ *  - Each change to a slot gets the next change number (RAM only), so a
+ *    client asks for what changed since its last visit: late readings from
+ *    the backlog and slots still filling included. The numbers restart at a
+ *    boot, under a new random boot id; a client's older token then gets
+ *    everything once more.
  *  - Two locks: s_mux for RAM, held briefly (the UI will read here), and
  *    s_flash around flash access and the sector map.
  */
@@ -33,11 +38,13 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_random.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -52,6 +59,7 @@ static const char *TAG = "readings";
 #define PER_SECTOR   ((SECTOR - HEADER_SIZE) / sizeof(readings_slot_t))  /* 170 */
 #define SECTOR_MAGIC 0x31525357u        /* "WSR1" in flash */
 #define FORMAT       1
+#define BATCH        16                 /* slots copied per hold of s_mux for a reader */
 
 typedef struct {
     uint32_t magic;
@@ -83,6 +91,9 @@ static SemaphoreHandle_t s_mux;         /* guards RAM, the state and s_failing *
 static SemaphoreHandle_t s_flash;       /* around flash access and the sector map */
 static readings_slot_t *s_ram;          /* READINGS_SLOTS, in PSRAM; NULL: not started */
 static uint32_t s_unwritten[(READINGS_SLOTS + 31) / 32];  /* a bit per record flash doesn't have yet */
+static uint32_t *s_changed;             /* each slot's last change number, in PSRAM; 1: loaded at boot */
+static uint32_t s_change = 1;           /* the latest change number */
+static uint32_t s_boot;                 /* random, for the cursor tokens */
 static uint32_t s_newest;               /* newest slot; 0: none */
 static sums_t s_sums;
 static readings_store_state_t s_state = READINGS_OFF;
@@ -228,6 +239,7 @@ void readings_store_put_outdoor(const ws_link_record_t *r, uint32_t ts, int8_t r
     }
     s->check = check_of(s);
     mark(pos);
+    s_changed[pos] = ++s_change;
     if (slot > s_newest) {
         s_newest = slot;
     }
@@ -357,6 +369,67 @@ bool readings_store_latest(readings_slot_t *out)
     return any;
 }
 
+void readings_store_cursor(char *out)
+{
+    uint32_t change = 0;
+    if (s_ram != NULL) {
+        xSemaphoreTake(s_mux, portMAX_DELAY);
+        change = s_change;
+        xSemaphoreGive(s_mux);
+    }
+    snprintf(out, READINGS_CURSOR_LEN, "%08lx-%lu", (unsigned long)s_boot, (unsigned long)change);
+}
+
+/* The change number a token stands for; 0 (all) for none, a malformed one,
+ * or one from an earlier boot. */
+static uint32_t change_of(const char *token)
+{
+    if (token == NULL || *token == '\0') {
+        return 0;
+    }
+    char *end;
+    const unsigned long boot = strtoul(token, &end, 16);
+    if (*end != '-' || boot != s_boot) {
+        return 0;
+    }
+    return (uint32_t)strtoul(end + 1, NULL, 10);
+}
+
+bool readings_store_changed(const char *after, uint32_t since, readings_fn fn, void *ctx)
+{
+    if (s_ram == NULL) {
+        return true;
+    }
+    const uint32_t seen = change_of(after);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    const uint32_t newest = s_newest;
+    xSemaphoreGive(s_mux);
+    if (newest == 0) {
+        return true;
+    }
+    /* the ring's span, oldest first; anything older at a position is past it */
+    uint32_t slot = newest >= READINGS_SLOTS ? newest - READINGS_SLOTS + 1 : 1;
+    while (slot <= newest) {
+        readings_slot_t batch[BATCH];
+        unsigned n = 0;
+        xSemaphoreTake(s_mux, portMAX_DELAY);
+        for (; slot <= newest && n < BATCH; slot++) {
+            const uint32_t pos = slot % READINGS_SLOTS;
+            const readings_slot_t *s = &s_ram[pos];
+            if (s->ts == slot * READINGS_SLOT_S && s->ts > since && s_changed[pos] > seen) {
+                batch[n++] = *s;
+            }
+        }
+        xSemaphoreGive(s_mux);
+        for (unsigned i = 0; i < n; i++) {
+            if (!fn(&batch[i], ctx)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void readings_store_info(readings_store_info_t *out)
 {
     memset(out, 0, sizeof(*out));       /* READINGS_OFF */
@@ -403,9 +476,11 @@ static void take_part(int k, const uint8_t *records)
         const uint32_t slot = s.ts / READINGS_SLOT_S;
         if (s.ts == 0 || s.ts % READINGS_SLOT_S != 0 || slot % READINGS_SLOTS != pos || s.check != check_of(&s)) {
             memset(&s_ram[pos], 0, sizeof(s_ram[pos]));
+            s_changed[pos] = 0;
             continue;
         }
         s_ram[pos] = s;
+        s_changed[pos] = 1;
         if (slot > s_newest) {
             s_newest = slot;
         }
@@ -456,14 +531,17 @@ void readings_store_init(void)
     s_mux = xSemaphoreCreateMutex();
     s_flash = xSemaphoreCreateMutex();
     s_ram = heap_caps_calloc(READINGS_SLOTS, sizeof(*s_ram), MALLOC_CAP_SPIRAM);
+    s_changed = heap_caps_calloc(READINGS_SLOTS, sizeof(*s_changed), MALLOC_CAP_SPIRAM);
     s_buf = heap_caps_malloc(SECTOR, MALLOC_CAP_SPIRAM);
-    if (s_mux == NULL || s_flash == NULL || s_ram == NULL || s_buf == NULL) {
+    if (s_mux == NULL || s_flash == NULL || s_ram == NULL || s_changed == NULL || s_buf == NULL) {
         ESP_LOGE(TAG, "no memory: the readings aren't kept");
         free(s_ram);
+        free(s_changed);
         free(s_buf);
         s_ram = NULL;
         return;
     }
+    s_boot = esp_random();
 
     s_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, READINGS_PARTITION);
     if (s_part == NULL) {

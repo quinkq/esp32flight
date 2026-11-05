@@ -63,6 +63,22 @@ void readings_store_flush(void);
 /* A copy of the newest slot; false while there's none. */
 bool readings_store_latest(readings_slot_t *out);
 
+/* What a client has seen, as a token for URLs: "<boot>-<change>". Every
+ * change to a slot gets the next change number; a token from an earlier
+ * boot counts as having seen nothing. */
+#define READINGS_CURSOR_LEN  24
+
+/* The token for everything up to now. Take it before readings_store_changed():
+ * a slot changed in between is sent again next time, never missed. */
+void readings_store_cursor(char *out);
+
+typedef bool (*readings_fn)(const readings_slot_t *s, void *ctx);
+
+/* The slots changed since the token `after` (NULL or "": all) with ts > since,
+ * oldest first, to fn, which may block: it's called outside the store's
+ * lock. Stops early, returning false, when fn returns false. */
+bool readings_store_changed(const char *after, uint32_t since, readings_fn fn, void *ctx);
+
 typedef enum {
     READINGS_OFF,              /* not started, or no memory */
     READINGS_FLASH,            /* readings kept in flash too */
