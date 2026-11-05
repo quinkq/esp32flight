@@ -1,11 +1,12 @@
 /*
- * The weather station on the panel's web server (weather-station fork). For
- * now the outdoor unit's diagnostics; the readings follow with the store.
- * Every handler checks the panel password, like the rest of the panel.
+ * The weather station on the panel's web server (weather-station fork): the
+ * outdoor unit's diagnostics and the stored readings. Every handler checks
+ * the panel password, like the rest of the panel.
  *
  *   GET /outdoor                       a small page that refreshes itself
  *   GET /api/outdoor                   the outdoor unit as the display sees it, JSON
  *   GET /api/outdoor/events?since=T    the event log after unix time T, tab-separated
+ *   GET /api/readings                  the newest stored slot (raw values) and the store's state, JSON
  */
 #include "weather_http.h"
 
@@ -17,6 +18,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "outdoor_link.h"
+#include "readings_store.h"
 #include "web_server.h"
 
 static const char *TAG = "weather_http";
@@ -233,12 +235,83 @@ static esp_err_t outdoor_events_get(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static const char *store_state_name(readings_store_state_t s)
+{
+    switch (s) {
+    case READINGS_FLASH:
+        return "flash";
+    case READINGS_RAM_ONLY:
+        return "ram only";
+    default:
+        return "off";
+    }
+}
+
+/* a value in its unit, or null when it's missing */
+static void add_value(cJSON *o, const char *key, bool ok, double v)
+{
+    if (ok) {
+        cJSON_AddNumberToObject(o, key, v);
+    } else {
+        cJSON_AddNullToObject(o, key);
+    }
+}
+
+static esp_err_t readings_api_get(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    readings_store_info_t si;
+    readings_store_info(&si);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *st = cJSON_AddObjectToObject(root, "store");
+    cJSON_AddStringToObject(st, "state", store_state_name(si.state));
+    if (si.state == READINGS_RAM_ONLY) {
+        cJSON_AddStringToObject(st, "why", si.why);
+    }
+    cJSON_AddBoolToObject(st, "write_failing", si.write_failing);
+    cJSON_AddNumberToObject(st, "slots", si.slots);
+    cJSON_AddNumberToObject(st, "unwritten", si.unwritten);
+    add_value(st, "oldest", si.oldest != 0, si.oldest);
+    add_value(st, "newest", si.newest != 0, si.newest);
+
+    readings_slot_t s;
+    if (readings_store_latest(&s)) {
+        /* raw: calibration comes with the settings */
+        cJSON *o = cJSON_AddObjectToObject(root, "outdoor");
+        const bool sht = s.flags & READINGS_SHT_OK, bme = s.flags & READINGS_BME_OK;
+        cJSON_AddNumberToObject(o, "ts", s.ts);
+        add_value(o, "sht_t", sht, s.sht_t / 100.0);
+        add_value(o, "sht_rh", sht, s.sht_rh / 100.0);
+        add_value(o, "bme_t", bme, s.bme_t / 100.0);
+        add_value(o, "bme_rh", bme, s.bme_rh / 100.0);
+        add_value(o, "bme_p", bme, s.bme_p / 10.0);
+        add_value(o, "bat_mv", s.bat_mv != WS_LINK_NO_U16, s.bat_mv);
+        add_value(o, "rssi", s.rssi != READINGS_NO_RSSI, s.rssi);
+        cJSON_AddNumberToObject(o, "readings", s.count);
+        cJSON_AddBoolToObject(o, "late", s.flags & READINGS_LATE);
+        cJSON_AddBoolToObject(o, "low_battery", s.flags & READINGS_LOW_BATTERY);
+    } else {
+        cJSON_AddNullToObject(root, "outdoor");
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    const esp_err_t err = httpd_resp_send(req, json ? json : "{}", HTTPD_RESP_USE_STRLEN);
+    free(json);
+    return err;
+}
+
 void weather_http_register(httpd_handle_t server)
 {
     const httpd_uri_t uris[] = {
         { .uri = "/outdoor", .method = HTTP_GET, .handler = outdoor_page_get },
         { .uri = "/api/outdoor", .method = HTTP_GET, .handler = outdoor_api_get },
         { .uri = "/api/outdoor/events", .method = HTTP_GET, .handler = outdoor_events_get },
+        { .uri = "/api/readings", .method = HTTP_GET, .handler = readings_api_get },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         if (httpd_register_uri_handler(server, &uris[i]) != ESP_OK) {

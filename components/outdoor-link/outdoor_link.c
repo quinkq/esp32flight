@@ -10,14 +10,14 @@
  *  - Wi-Fi power save is off: with it on, the radio sleeps between the
  *    access point's beacons and misses the outdoor unit's frames.
  *  - The receive callback runs in the Wi-Fi task and only queues the frame.
- *    A small task checks it, replies (clock, interval) and logs it. Storage
- *    comes later, and after the reply: records into RAM, the reply, then the
- *    flash write, so the outdoor unit's 100 ms wait for the reply never
- *    depends on the file system (a crash in between loses that frame).
+ *    A small task checks it, replies (clock, interval), logs it and puts its
+ *    new readings into the store's RAM (components/readings-store).
  *  - The same task keeps the outdoor unit's health (outdoor_health.c) and
  *    does its housekeeping every 30 s, and about a second after the last
  *    frame of a burst: a catch-up sends its next frame right after our
- *    reply, so nothing slow runs in between.
+ *    reply, so nothing slow runs in between. That's also when the store
+ *    writes to flash, so the outdoor unit's 100 ms wait for a reply never
+ *    depends on it (a crash in between loses that burst).
  */
 #include "outdoor_link.h"
 
@@ -38,12 +38,14 @@ static const char *TAG = "outdoor_link";
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "outdoor_health.h"
+#include "readings_store.h"
 #include "ws_link.h"
 
 #define TASK_PRIORITY    5            /* above the app's tasks (3-4): the outdoor unit waits 100 ms */
 #define TASK_STACK       6144         /* internal RAM; the daily summary logs how much is unused */
 #define HOUSEKEEPING_MS  30000
 #define BURST_MS         1000         /* quiet this long after a frame: the burst is over */
+#define FUTURE_S         3600         /* a reading dated later than this past the display's time isn't stored */
 
 typedef struct {
     uint8_t data[WS_LINK_MAX_PAYLOAD];
@@ -132,6 +134,39 @@ static void log_record(const ws_link_record_t *r)
              (unsigned long)r->ts, sht, bme, bat);
 }
 
+/* The frame's new readings into the store. With the display's time they're
+ * dated by ws_link_correct_ts(): the outdoor unit's clock runs at a slightly
+ * wrong rate, so a reading's error grows with the time since its clock was
+ * set (all of the offset after a power-on). now 0: the display has no time
+ * yet, so the outdoor unit's clock was synced (the frame isn't answered
+ * otherwise) and its times stay. The frame's RSSI goes with its newest
+ * reading only. */
+static void store(const ws_link_readings_t *f, const uint8_t *records, int8_t rssi,
+                  const outdoor_marks_t *marks, time_t now)
+{
+    const int64_t offset = now != 0 ? (int64_t)now - f->outdoor_now : 0;
+    for (unsigned i = 0; i < f->count; i++) {
+        if (!(marks->fresh & 1u << i)) {
+            continue;                   /* stored already: our reply to it got lost */
+        }
+        ws_link_record_t r;
+        memcpy(&r, records + i * sizeof(r), sizeof(r));
+        const uint32_t ts = ws_link_correct_ts(r.ts, offset, f->clock_set_at, f->outdoor_now);
+        if (ts < CLOCK_VALID_FROM || (now != 0 && ts > now + FUTURE_S)) {
+            ESP_LOGW(TAG, "  reading at %lu not stored: dated %lu", (unsigned long)r.ts, (unsigned long)ts);
+            continue;
+        }
+        uint8_t flags = 0;
+        if (marks->late & 1u << i) {
+            flags |= READINGS_LATE;
+        }
+        if (f->flags & WS_OUTDOOR_LOW_BATTERY) {
+            flags |= READINGS_LOW_BATTERY;
+        }
+        readings_store_put_outdoor(&r, ts, i + 1 == f->count ? rssi : READINGS_NO_RSSI, flags);
+    }
+}
+
 static void handle(const rx_item_t *item)
 {
     ws_link_readings_t f;   /* the fixed part; the records follow it */
@@ -187,7 +222,11 @@ static void handle(const rx_item_t *item)
     memcpy(&newest, item->data + sizeof(f) + (f.count - 1) * sizeof(newest), sizeof(newest));
     log_record(&newest);
 
-    outdoor_health_frame(&f, item->data + sizeof(f), item->rssi, accept);
+    outdoor_marks_t marks;
+    outdoor_health_frame(&f, item->data + sizeof(f), item->rssi, accept, &marks);
+    if (accept) {
+        store(&f, item->data + sizeof(f), item->rssi, &marks, have_time ? now : 0);
+    }
 }
 
 static void rx_task(void *arg)
@@ -200,6 +239,7 @@ static void rx_task(void *arg)
             wait = pdMS_TO_TICKS(BURST_MS);
             continue;
         }
+        readings_store_flush();         /* first, so the tick sees how that went */
         outdoor_health_tick();
         wait = pdMS_TO_TICKS(HOUSEKEEPING_MS);
     }

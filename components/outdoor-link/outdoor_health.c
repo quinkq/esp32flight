@@ -32,6 +32,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "outdoor_link.h"
+#include "readings_store.h"
 
 static const char *TAG = "outdoor_link";
 
@@ -82,6 +83,8 @@ static bool s_sht_ok = true, s_bme_ok = true;
 static uint8_t s_sht_run, s_bme_run;
 static bool s_file_warned;
 static bool s_space_low;
+static readings_store_state_t s_store_state;
+static bool s_store_failing;
 
 static bool have_time(time_t *now)
 {
@@ -285,9 +288,10 @@ static void sensor(const char *name, bool ok, bool *state, uint8_t *run, uint32_
     }
 }
 
-/* One reading of an answered frame; false if it was counted before. */
+/* One reading of an answered frame; false if it was counted before. *late:
+ * it comes from the backlog. */
 static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t gap_s,
-                    uint32_t *late, uint32_t *missing)
+                    bool *late, uint32_t *missing)
 {
     if (s_have_ts && r->ts <= s_last_ts && s_last_ts - r->ts <= BACKLOG_SPAN_S) {
         return false;                   /* the outdoor unit missed our reply and sent it again */
@@ -305,9 +309,7 @@ static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t ga
 
     /* its age when sent, both times from its own clock */
     const uint32_t age = outdoor_now > r->ts ? outdoor_now - r->ts : 0;
-    if (2 * age > 2 * gap_s - s_interval_s) {
-        (*late)++;
-    }
+    *late = 2 * age > 2 * gap_s - s_interval_s;
     if (r->bat_mv != WS_LINK_NO_U16) {
         if (s_day.bat_max == 0) {
             s_day.bat_min = s_day.bat_max = r->bat_mv;
@@ -342,8 +344,9 @@ bool outdoor_health_init(uint32_t interval_s)
 }
 
 void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, int8_t rssi,
-                          bool answered)
+                          bool answered, outdoor_marks_t *marks)
 {
+    *marks = (outdoor_marks_t){0};
     const int64_t now_us = esp_timer_get_time();
     time_t now;
     const bool dated = have_time(&now);
@@ -370,8 +373,14 @@ void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, i
         if (!answered) {
             continue;                   /* it comes again with the next wake */
         }
-        if (reading(&r, f->outdoor_now, gap_s, &late, &missing)) {
+        bool is_late = false;
+        if (reading(&r, f->outdoor_now, gap_s, &is_late, &missing)) {
             readings++;
+            marks->fresh |= 1u << i;
+            if (is_late) {
+                late++;
+                marks->late |= 1u << i;
+            }
         } else {
             twice++;
         }
@@ -524,6 +533,22 @@ void outdoor_health_tick(void)
     } else if (free_kb > SPACE_OK_KB) {
         s_space_low = false;
     }
+
+    /* the readings store: why it can't use flash, or flash writes failing */
+    readings_store_info_t si;
+    readings_store_info(&si);
+    if (si.state != s_store_state) {
+        s_store_state = si.state;
+        if (si.state == READINGS_RAM_ONLY) {
+            event("store", "readings stay in RAM and are lost at a restart: %s", si.why);
+        }
+    }
+    if (si.write_failing && !s_store_failing) {
+        event("store", "can't write the readings to flash: they wait in RAM");
+    } else if (!si.write_failing && s_store_failing) {
+        event("store", "readings written to flash again");
+    }
+    s_store_failing = si.write_failing;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_h.status = status;
