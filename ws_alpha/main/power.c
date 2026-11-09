@@ -186,7 +186,9 @@ void power_set_interval(uint16_t interval_s)
     if (interval_s == s_state.interval_s) {
         return;
     }
-    if (interval_s < 60 || interval_s > 900 || 900 % interval_s != 0) {
+    /* any value: the display's store takes readings to the nearest 15-minute
+     * slot (averaged below 15 min, gaps between slots above) */
+    if (interval_s < 60 || interval_s > 6 * 3600) {
         ESP_LOGW(TAG, "ignoring interval %u s from the display", interval_s);
         return;
     }
