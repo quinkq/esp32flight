@@ -21,6 +21,8 @@
 #include "outdoor_link.h"   /* weather-station fork: link to the outdoor unit */
 #include "readings_store.h" /* weather-station fork: its readings, in RAM and their own partition */
 #include "indoor.h"         /* weather-station fork: the indoor SHT40 */
+#include "ws_settings.h"    /* weather-station fork: its own settings */
+#include "altitude.h"       /* weather-station fork: for pressure at sea level */
 
 static const char *TAG = "canflight";
 
@@ -51,6 +53,7 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
     settings_load();
+    ws_settings_init();     /* weather-station fork */
 
     ESP_ERROR_CHECK(waveshare_esp32_s3_rgb_lcd_init());
     waveshare_rgb_lcd_bl_on();
@@ -81,6 +84,7 @@ void app_main(void)
         ESP_LOGW(TAG, "Wi-Fi init failed: %s", esp_err_to_name(err));
     } else {
         outdoor_link_start();
+        altitude_start();   /* weather-station fork */
     }
 
     input_ctl_init();

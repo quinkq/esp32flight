@@ -47,7 +47,7 @@ typedef struct {
 /* frame and counts take the same arguments, in the same order, in both */
 static const strings_t k_en = {
     .tab = "Weather station",
-    .link_off = "The link to the outdoor unit is off: no pairing in this build.",
+    .link_off = "The link to the outdoor unit is off (switched off or not paired): see the weather station page on the web panel.",
     .status = { "not heard yet", "OK", "late", "silent" },
     .last_heard = " · last heard %s ago",
     .next = " · next frame in %s",
@@ -73,7 +73,7 @@ static const strings_t k_en = {
 
 static const strings_t k_pl = {
     .tab = "Stacja pogodowa",
-    .link_off = "Połączenie z jednostką zewnętrzną wyłączone: brak parowania w tej wersji.",
+    .link_off = "Połączenie z jednostką zewnętrzną wyłączone (wyłączone lub brak parowania): zobacz stronę stacji pogodowej w panelu WWW.",
     .status = { "jeszcze nie odebrano", "OK", "spóźnia się", "milczy" },
     .last_heard = " · ostatnio %s temu",
     .next = " · następna ramka za %s",

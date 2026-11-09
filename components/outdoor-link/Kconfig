@@ -5,7 +5,9 @@ menu "Outdoor unit link"
         default n
         help
             Off in public builds. The pairing (the outdoor unit's MAC and the
-            two keys) comes from a config fragment kept outside the repository.
+            two keys) comes from a config fragment kept outside the repository,
+            as the default until the weather station settings (web page) save
+            one.
 
     config OUTDOOR_LINK_PEER_MAC
         string "Outdoor unit's MAC (aa:bb:cc:dd:ee:ff)"
@@ -29,7 +31,8 @@ menu "Outdoor unit link"
         help
             The display decides the outdoor unit's interval: it goes out with
             every reply, and the outdoor unit uses it from its next wake on.
-            Must divide 900 s, the display's storage grid.
+            The default until the weather station settings save one (3 min to
+            6 h there); 1 minute only from here, for the bench.
 
         config OUTDOOR_LINK_INTERVAL_60
             bool "1 minute (bench)"

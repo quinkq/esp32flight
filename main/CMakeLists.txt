@@ -63,6 +63,8 @@ idf_component_register(
         "web_server.c"
         "weather_http.c"
         "indoor.c"
+        "altitude.c"
+        "calibration.c"
         "font_pl_8.c"
         "font_pl_10.c"
         "font_pl_12.c"
@@ -71,7 +73,7 @@ idf_component_register(
         "font_pl_20.c"
     INCLUDE_DIRS "." ${BOARD_PORT_INC} "tab5"
     REQUIRES esp_wifi esp_http_client esp_http_server esp-tls nvs_flash json spiffs esp_netif app_update mqtt
-             outdoor-link readings-store
+             outdoor-link readings-store ws-settings
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_LVGL_H_INCLUDE_SIMPLE=1)

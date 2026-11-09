@@ -11,6 +11,10 @@
 
 bool outdoor_health_init(uint32_t interval_s);
 
+/* The interval the outdoor unit is told (it can change at any time, in the
+ * weather station settings); the late and missing counts follow it. */
+void outdoor_health_set_interval(uint32_t interval_s);
+
 /* What outdoor_health_frame() found, bit i for the frame's reading i: fresh =
  * not seen before (the outdoor unit sends readings again when our reply got
  * lost), late = from its backlog. */

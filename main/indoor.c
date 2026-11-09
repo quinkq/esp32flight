@@ -13,6 +13,8 @@
  *    time, samples only update the latest value.
  *  - Lost after 3 failed samples in a row, back after 3 good ones: an
  *    "indoor" event in the weather station's event log.
+ *  - Switched off in the weather station settings: no samples, the
+ *    half-filled slot dropped; back on, it starts afresh.
  */
 #include "indoor.h"
 
@@ -31,6 +33,7 @@
 #include "outdoor_link.h"
 #include "readings_store.h"
 #include "waveshare_rgb_lcd_port.h"
+#include "ws_settings.h"
 
 static const char *TAG = "indoor";
 
@@ -47,7 +50,7 @@ static const char *TAG = "indoor";
 #define TASK_PRIORITY    2
 
 static SemaphoreHandle_t s_mux;         /* guards s_latest and s_latest_us */
-static indoor_t s_latest = { .answering = true };
+static indoor_t s_latest = { .on = true, .answering = true };
 static int64_t s_latest_us;
 
 /* the task's own */
@@ -124,6 +127,21 @@ static void track(bool ok)
 
 static void sample(void)
 {
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_latest.on = cfg.indoor_on;
+    if (!cfg.indoor_on) {
+        s_latest.have = false;
+    }
+    xSemaphoreGive(s_mux);
+    if (!cfg.indoor_on) {
+        s_slot = 0;                     /* the half-filled slot is dropped */
+        s_n = 0;
+        s_run = 0;
+        return;
+    }
+
     uint8_t d[6];
     const bool ok = command(CMD_MEASURE, MEASURE_MS, d);
     track(ok);

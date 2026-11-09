@@ -1,33 +1,50 @@
 /*
  * The weather station on the panel's web server (weather-station fork): the
- * outdoor unit's diagnostics and the stored readings. Every handler checks
- * the panel password, like the rest of the panel.
+ * outdoor unit's diagnostics, the stored readings and the weather station
+ * settings. Every handler checks the panel password, like the rest of the
+ * panel.
  *
- *   GET /outdoor                       a small page that refreshes itself
+ *   GET /outdoor                       the weather station's page: diagnostics, refreshing
+ *                                      itself, and the settings form
  *   GET /api/outdoor                   the outdoor unit as the display sees it, JSON
  *   GET /api/outdoor/events?since=T    the event log after unix time T, tab-separated
- *   GET /api/readings                  the newest stored outdoor slot (raw values), the indoor
- *                                      sensor's latest sample and the store's state, JSON
- *   GET /api/readings/history?cursor=C&since=T&fmt=json|csv|influx
+ *   GET /api/readings?raw=1            the newest stored outdoor slot, the indoor sensor's latest
+ *                                      sample and the store's state, JSON
+ *   GET /api/readings/history?cursor=C&since=T&fmt=json|csv|influx&raw=1
  *                                      the slots changed since cursor C (none: all) with ts > T,
  *                                      oldest first; the next cursor in the X-Cursor header (and
- *                                      in the JSON). Raw values until the calibration settings.
+ *                                      in the JSON)
+ *   GET/POST /api/weather-station/settings
+ *                                      the weather station settings, JSON; the keys are never
+ *                                      sent back. A new pairing or link switch restarts the display.
+ *
+ * Readings come calibrated (offsets, battery factor, pressure at sea level
+ * when the altitude is known); raw=1 gives the stored values.
  */
 #include "weather_http.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "altitude.h"
+#include "calibration.h"
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "indoor.h"
 #include "outdoor_link.h"
 #include "readings_store.h"
+#include "sdkconfig.h"
+#include "settings.h"
 #include "web_server.h"
+#include "ws_settings.h"
 
 static const char *TAG = "weather_http";
 
@@ -36,7 +53,7 @@ static const char *TAG = "weather_http";
 static const char OUTDOOR_HTML[] =
 "<!doctype html><html><head><meta charset='utf-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Outdoor unit</title>"
+"<title>Weather station</title>"
 "<style>"
 "body{background:#0c1510;color:#e7f2ea;font-family:system-ui,sans-serif;margin:0 auto;padding:18px;max-width:1000px}"
 "h1{color:#5dd39e;font-size:22px;margin:0 0 4px}"
@@ -52,13 +69,45 @@ static const char OUTDOOR_HTML[] =
 "table{border-collapse:collapse;font-size:14px;width:100%}"
 "td{padding:5px 8px;border-bottom:1px solid #14231b;vertical-align:top}"
 "td.t{color:#86a695;white-space:nowrap}"
+"fieldset{border:1px solid #23402f;border-radius:12px;margin:10px 0;padding:8px 14px}"
+"legend{color:#86a695;font-size:14px}"
+"label{display:block;margin:7px 0;font-size:14px}"
+"input{background:#14231b;color:#e7f2ea;border:1px solid #23402f;border-radius:6px;padding:4px 6px;font-size:14px}"
+"input[type=number]{width:90px}input.w{width:230px}"
+"button{background:#5dd39e;color:#0c1510;border:0;border-radius:8px;padding:8px 18px;font-size:15px;cursor:pointer}"
 "</style></head><body>"
-"<h1>Outdoor unit</h1>"
-"<div class='dim'><a href='/'>&larr; panel</a> &middot; <a href='/api/outdoor/events'>full event log</a></div>"
+"<h1>Weather station</h1>"
+"<div class='dim'><a href='/'>&larr; panel</a> &middot; <a href='/api/outdoor/events'>full event log</a>"
+" &middot; <a href='#set'>settings</a></div>"
+"<h3>Outdoor unit</h3>"
 "<div id='st' class='st'>&hellip;</div>"
 "<div id='cards' class='cards'></div>"
 "<p id='frame'></p><p id='counts'></p>"
 "<h3>Recent events</h3><table id='ev'></table>"
+"<h3 id='set'>Settings</h3>"
+"<form id='sf' onsubmit='return save(event)'>"
+"<fieldset><legend>Outdoor unit link</legend>"
+"<label><input type=checkbox id='s_link'> link on</label>"
+"<label>Outdoor unit's MAC <input id='s_mac' class=w placeholder='aa:bb:cc:dd:ee:ff'></label>"
+"<label>PMK <input id='s_pmk' class=w type=password autocomplete=off></label>"
+"<label>LMK <input id='s_lmk' class=w type=password autocomplete=off></label>"
+"<div class=dim id='s_keys'></div></fieldset>"
+"<fieldset><legend>Measurements</legend>"
+"<label>The outdoor unit measures every <input id='s_int' type=number step=1 max=360> minutes (3 to 360)</label>"
+"<label><input type=checkbox id='s_in'> indoor sensor on</label></fieldset>"
+"<fieldset><legend>Calibration</legend>"
+"<label>Outdoor temperature <input id='s_ot' type=number step=0.1 min=-5 max=5> &deg;C</label>"
+"<label>Outdoor humidity <input id='s_orh' type=number step=0.1 min=-10 max=10> %</label>"
+"<label>Indoor temperature <input id='s_it' type=number step=0.1 min=-5 max=5> &deg;C</label>"
+"<label>Indoor humidity <input id='s_irh' type=number step=0.1 min=-10 max=10> %</label>"
+"<label>Outdoor unit's battery voltage <input id='s_bat' type=number step=1 min=-50 max=50> &permil;</label>"
+"<div class=dim>Added to what the sensors measure. The stored values stay raw, so a change corrects the whole history.</div>"
+"</fieldset>"
+"<fieldset><legend>Altitude, for pressure at sea level</legend>"
+"<div id='s_alt' class=dim></div>"
+"<label>Override <input id='s_alto' type=number step=1 min=-100 max=3000> m (empty: automatic)</label>"
+"</fieldset>"
+"<button>Save</button> <span id='s_msg'></span></form>"
 "<script>"
 "const R=['unknown','power-on','reset pin','software restart','panic','interrupt watchdog',"
 "'task watchdog','other watchdog','deep-sleep wake','brownout','SDIO','USB','JTAG','eFuse',"
@@ -72,7 +121,7 @@ static const char OUTDOOR_HTML[] =
 "function ok(name,good){return '<span class='+(good?'ok':'bad')+'>'+name+' '+(good?'&#10003;':'&#10007;')+'</span>';}"
 "async function tick(){"
 "let d;try{d=await (await fetch('/api/outdoor')).json();}catch(e){$('st').textContent='display not reachable';return;}"
-"if(!d.running){$('st').innerHTML='<span class=bad>&#9679; link off</span> (not paired in this build)';return;}"
+"if(!d.running){$('st').innerHTML='<span class=bad>&#9679; link off</span> (switched off, not paired, or not in this build: see the settings below)';return;}"
 "let s='<span class='+d.status.replace(' ','')+'>&#9679; '+d.status+'</span>';"
 "if(d.last_heard_s_ago!==undefined){s+=' &middot; last heard '+dur(d.last_heard_s_ago)+' ago';"
 "s+=d.next_due_s>=0?' &middot; next frame in '+dur(d.next_due_s):' &middot; overdue by '+dur(-d.next_due_s);}"
@@ -97,7 +146,34 @@ static const char OUTDOOR_HTML[] =
 "+c.late+' late, '+c.missing+' missing, '+c.twice+' twice &middot; '+c.channel_changes+' channel changes';"
 "$('ev').innerHTML=d.events.map(e=>'<tr><td class=t>'+(e.time?hm(e.time):'&ndash;')+'</td><td class=t>'"
 "+esc(e.kind)+'</td><td>'+esc(e.text)+'</td></tr>').join('');}"
-"tick();setInterval(tick,10000);"
+"const U='/api/weather-station/settings';"
+"function num(id){const v=$(id).value;return v===''?null:Number(v);}"
+"async function load(){let d;try{d=await (await fetch(U)).json();}catch(e){$('s_msg').textContent='settings not reachable';return;}"
+"$('s_link').checked=d.link_on;$('s_mac').value=d.mac;$('s_pmk').value='';$('s_lmk').value='';"
+"$('s_pmk').placeholder=$('s_lmk').placeholder=d.paired?'set (empty: keep)':'32 hex digits';"
+"$('s_keys').textContent=(d.link_in_build?'':'This build has no link to the outdoor unit. ')"
+"+'Changing the link switch, the MAC or a key restarts the display.';"
+"$('s_int').value=Math.round(d.interval_s/60);$('s_int').min=d.interval_s>=180?3:1;"
+"$('s_in').checked=d.indoor_on;"
+"$('s_ot').value=d.cal_out_t;$('s_orh').value=d.cal_out_rh;$('s_it').value=d.cal_in_t;$('s_irh').value=d.cal_in_rh;"
+"$('s_bat').value=d.bat_trim_pm;$('s_alto').value=d.alt_override_m==null?'':d.alt_override_m;"
+"const at=d.alt_fixed_home?d.alt_home_lat.toFixed(5)+', '+d.alt_home_lon.toFixed(5):'';"
+"$('s_alt').innerHTML=(d.alt_fixed_home?(d.alt_auto_m==null?'Looking up the altitude of the home location '+at+'&hellip; ':"
+"'The home location '+at+' is at '+d.alt_auto_m+' m (Open-Meteo). '):"
+"'The home location comes from the internet address, too rough for the altitude: set fixed coordinates on the <a href=\"/\">panel</a>&rsquo;s Location card. ')"
+"+(d.alt_used_m==null?'Pressure is shown as measured.':'Pressure is reduced to sea level from '+d.alt_used_m+' m.');}"
+"async function save(ev){ev.preventDefault();const b={link_on:$('s_link').checked,mac:$('s_mac').value.trim(),"
+"interval_s:Math.round(num('s_int')*60),indoor_on:$('s_in').checked,cal_out_t:num('s_ot')||0,cal_out_rh:num('s_orh')||0,"
+"cal_in_t:num('s_it')||0,cal_in_rh:num('s_irh')||0,bat_trim_pm:num('s_bat')||0,alt_override_m:num('s_alto')};"
+"if($('s_pmk').value)b.pmk=$('s_pmk').value.trim();if($('s_lmk').value)b.lmk=$('s_lmk').value.trim();"
+"$('s_msg').textContent='saving...';"
+"let r;try{r=await fetch(U,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});}"
+"catch(e){$('s_msg').textContent='display not reachable';return false;}"
+"if(!r.ok){$('s_msg').innerHTML='<span class=bad>'+esc(await r.text())+'</span>';return false;}"
+"const a=await r.json();"
+"if(a.restart){$('s_msg').textContent='Saved. The display restarts; this page reloads in 20 s.';setTimeout(()=>location.reload(),20000);}"
+"else{$('s_msg').textContent='Saved.';load();}return false;}"
+"tick();setInterval(tick,10000);load();"
 "</script></body></html>";
 
 static esp_err_t outdoor_page_get(httpd_req_t *req)
@@ -265,15 +341,29 @@ static void add_value(cJSON *o, const char *key, bool ok, double v)
     }
 }
 
+/* ?raw=1 in a query: the stored values, without the calibration */
+static bool raw_in(const char *query)
+{
+    char v[4];
+    return httpd_query_key_value(query, "raw", v, sizeof(v)) == ESP_OK && strcmp(v, "1") == 0;
+}
+
 static esp_err_t readings_api_get(httpd_req_t *req)
 {
     if (!auth_ok(req)) {
         return require_auth(req);
     }
+    char query[32] = "";
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    const bool raw = raw_in(query);
+    calibration_t cal;
+    calibration_get(&cal);
     readings_store_info_t si;
     readings_store_info(&si);
 
     cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "calibrated", !raw);
+    cJSON_AddBoolToObject(root, "pressure_at_sea_level", !raw && cal.have_alt);
     cJSON *st = cJSON_AddObjectToObject(root, "store");
     cJSON_AddStringToObject(st, "state", store_state_name(si.state));
     if (si.state == READINGS_RAM_ONLY) {
@@ -287,7 +377,9 @@ static esp_err_t readings_api_get(httpd_req_t *req)
 
     readings_slot_t s;
     if (readings_store_latest(&s)) {
-        /* raw: calibration comes with the settings */
+        if (!raw) {
+            calibration_apply(&cal, &s);
+        }
         cJSON *o = cJSON_AddObjectToObject(root, "outdoor");
         const bool sht = s.flags & READINGS_SHT_OK, bme = s.flags & READINGS_BME_OK;
         cJSON_AddNumberToObject(o, "ts", s.ts);
@@ -305,10 +397,14 @@ static esp_err_t readings_api_get(httpd_req_t *req)
         cJSON_AddNullToObject(root, "outdoor");
     }
 
-    /* the latest sample, raw; the store has the slot means */
+    /* the latest sample; the store has the slot means */
     indoor_t in;
     indoor_latest(&in);
+    if (in.have && !raw) {
+        calibration_indoor(&cal, &in.t, &in.rh);
+    }
     cJSON *i = cJSON_AddObjectToObject(root, "indoor");
+    cJSON_AddBoolToObject(i, "on", in.on);
     cJSON_AddBoolToObject(i, "answering", in.answering);
     if (in.serial != 0) {
         char serial[12];
@@ -337,6 +433,8 @@ typedef enum { FMT_JSON, FMT_CSV, FMT_INFLUX } fmt_t;
 typedef struct {
     httpd_req_t *req;
     fmt_t fmt;
+    bool  raw;                          /* the stored values, without cal */
+    calibration_t cal;
     bool  first;                        /* JSON: no comma before the first slot */
     bool  failed;                       /* the client went away */
     size_t len;
@@ -460,13 +558,17 @@ static void put_row(out_t *o, const readings_slot_t *s)
     }
 }
 
-static bool put_slot(const readings_slot_t *s, void *ctx)
+static bool put_slot(const readings_slot_t *stored, void *ctx)
 {
     out_t *o = ctx;
+    readings_slot_t s = *stored;
+    if (!o->raw) {
+        calibration_apply(&o->cal, &s);
+    }
     if (o->fmt == FMT_INFLUX) {
-        put_influx(o, s);
+        put_influx(o, &s);
     } else {
-        put_row(o, s);
+        put_row(o, &s);
     }
     return !o->failed;
 }
@@ -476,7 +578,7 @@ static esp_err_t history_get(httpd_req_t *req)
     if (!auth_ok(req)) {
         return require_auth(req);
     }
-    char query[128], cursor[READINGS_CURSOR_LEN] = "", v[16];
+    char query[128] = "", cursor[READINGS_CURSOR_LEN] = "", v[16];
     uint32_t since = 0;
     fmt_t fmt = FMT_JSON;
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
@@ -502,6 +604,8 @@ static esp_err_t history_get(httpd_req_t *req)
     }
     o->req = req;
     o->fmt = fmt;
+    o->raw = raw_in(query);
+    calibration_get(&o->cal);
     o->first = true;
 
     /* before the slots: one that changes meanwhile comes again next time */
@@ -512,7 +616,8 @@ static esp_err_t history_get(httpd_req_t *req)
     httpd_resp_set_type(req, fmt == FMT_JSON ? "application/json"
                            : fmt == FMT_CSV ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8");
     if (fmt == FMT_JSON) {
-        out_printf(o, "{\"cursor\":\"%s\",\"slots\":[", next);
+        out_printf(o, "{\"cursor\":\"%s\",\"calibrated\":%s,\"pressure_at_sea_level\":%s,\"slots\":[", next,
+                   o->raw ? "false" : "true", !o->raw && o->cal.have_alt ? "true" : "false");
     } else if (fmt == FMT_CSV) {
         out_printf(o, "ts,time,sht_t,sht_rh,bme_t,bme_rh,bme_p,bat_mv,rssi,readings,late,low_battery,in_t,in_rh\n");
     }
@@ -526,6 +631,160 @@ static esp_err_t history_get(httpd_req_t *req)
     return failed ? ESP_FAIL : httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static esp_err_t ws_settings_api_get(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
+#if CONFIG_OUTDOOR_LINK_ENABLED
+    const bool in_build = true;
+#else
+    const bool in_build = false;
+#endif
+    char mac[18] = "";
+    if (memcmp(cfg.mac, (const uint8_t[6]){0}, sizeof(cfg.mac)) != 0) {
+        snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", cfg.mac[0], cfg.mac[1], cfg.mac[2],
+                 cfg.mac[3], cfg.mac[4], cfg.mac[5]);
+    }
+    ws_settings_t looked_up = cfg;
+    looked_up.alt_override_m = WS_ALT_AUTO;
+    int auto_m = 0, used_m = 0;
+    const bool have_auto = altitude_m(&looked_up, &auto_m);
+    const bool have_used = altitude_m(&cfg, &used_m);
+    const settings_t *home = settings_get();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "link_in_build", in_build);
+    cJSON_AddBoolToObject(root, "link_on", cfg.link_on);
+    cJSON_AddBoolToObject(root, "paired", ws_settings_paired(&cfg));   /* the keys themselves never */
+    cJSON_AddStringToObject(root, "mac", mac);
+    cJSON_AddNumberToObject(root, "interval_s", cfg.interval_s);
+    cJSON_AddBoolToObject(root, "indoor_on", cfg.indoor_on);
+    cJSON_AddNumberToObject(root, "cal_out_t", cfg.cal_out_t / 100.0);
+    cJSON_AddNumberToObject(root, "cal_out_rh", cfg.cal_out_rh / 100.0);
+    cJSON_AddNumberToObject(root, "cal_in_t", cfg.cal_in_t / 100.0);
+    cJSON_AddNumberToObject(root, "cal_in_rh", cfg.cal_in_rh / 100.0);
+    cJSON_AddNumberToObject(root, "bat_trim_pm", cfg.bat_trim_pm);
+    add_value(root, "alt_override_m", cfg.alt_override_m != WS_ALT_AUTO, cfg.alt_override_m);
+    cJSON_AddBoolToObject(root, "alt_fixed_home", home->use_fixed_loc);
+    cJSON_AddNumberToObject(root, "alt_home_lat", home->lat);
+    cJSON_AddNumberToObject(root, "alt_home_lon", home->lon);
+    add_value(root, "alt_auto_m", have_auto, auto_m);
+    add_value(root, "alt_used_m", have_used, used_m);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const esp_err_t err = httpd_resp_send(req, json ? json : "{}", HTTPD_RESP_USE_STRLEN);
+    free(json);
+    return err;
+}
+
+/* A number in a unit into hundredths (or units, scale 1); false if it's
+ * absent. *why when it can't be stored at all. */
+static bool scaled(const cJSON *root, const char *key, double scale, int16_t *out, const char **why)
+{
+    const cJSON *j = cJSON_GetObjectItem(root, key);
+    if (!cJSON_IsNumber(j)) {
+        return false;
+    }
+    const long v = lround(j->valuedouble * scale);
+    if (v < -30000 || v > 30000) {
+        *why = "a value is far out of range";
+        return false;
+    }
+    *out = (int16_t)v;
+    return true;
+}
+
+/* A key: 32 hex digits; absent or empty keeps the stored one. */
+static void key_field(const cJSON *root, const char *name, uint8_t *key, const char **why)
+{
+    const cJSON *j = cJSON_GetObjectItem(root, name);
+    if (cJSON_IsString(j) && j->valuestring[0] != '\0' && !ws_settings_parse_hex(j->valuestring, key, 16)) {
+        *why = "the keys: 32 hex digits each";
+    }
+}
+
+static esp_err_t ws_settings_api_post(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    char body[512];
+    if (req->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "too long");
+    }
+    size_t got = 0;
+    while (got < req->content_len) {
+        const int n = httpd_req_recv(req, body + got, req->content_len - got);
+        if (n <= 0) {
+            return ESP_FAIL;
+        }
+        got += (size_t)n;
+    }
+    body[got] = '\0';
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not JSON");
+    }
+
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
+    const char *why = NULL;
+    const cJSON *j;
+    if (cJSON_IsBool(j = cJSON_GetObjectItem(root, "link_on"))) {
+        cfg.link_on = cJSON_IsTrue(j);
+    }
+    if (cJSON_IsString(j = cJSON_GetObjectItem(root, "mac"))) {
+        if (j->valuestring[0] == '\0') {
+            memset(cfg.mac, 0, sizeof(cfg.mac));
+        } else if (!ws_settings_parse_hex(j->valuestring, cfg.mac, sizeof(cfg.mac))) {
+            why = "the MAC: six hex pairs, like aa:bb:cc:dd:ee:ff";
+        }
+    }
+    key_field(root, "pmk", cfg.pmk, &why);
+    key_field(root, "lmk", cfg.lmk, &why);
+    if (cJSON_IsNumber(j = cJSON_GetObjectItem(root, "interval_s"))) {
+        const double s = j->valuedouble;
+        if (s < 0 || s > 65535) {
+            why = "the interval must be 3 minutes to 6 hours";
+        } else {
+            cfg.interval_s = (uint16_t)lround(s);
+        }
+    }
+    if (cJSON_IsBool(j = cJSON_GetObjectItem(root, "indoor_on"))) {
+        cfg.indoor_on = cJSON_IsTrue(j);
+    }
+    scaled(root, "cal_out_t", 100, &cfg.cal_out_t, &why);
+    scaled(root, "cal_out_rh", 100, &cfg.cal_out_rh, &why);
+    scaled(root, "cal_in_t", 100, &cfg.cal_in_t, &why);
+    scaled(root, "cal_in_rh", 100, &cfg.cal_in_rh, &why);
+    scaled(root, "bat_trim_pm", 1, &cfg.bat_trim_pm, &why);
+    if (cJSON_IsNull(j = cJSON_GetObjectItem(root, "alt_override_m"))) {
+        cfg.alt_override_m = WS_ALT_AUTO;
+    } else {
+        scaled(root, "alt_override_m", 1, &cfg.alt_override_m, &why);
+    }
+    cJSON_Delete(root);
+
+    bool restart = false;
+    if (why != NULL || ws_settings_set(&cfg, &restart, &why) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, why != NULL ? why : "not saved");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, restart ? "{\"saved\":true,\"restart\":true}" : "{\"saved\":true,\"restart\":false}");
+    if (restart) {
+        ESP_LOGI(TAG, "the outdoor unit's link or pairing changed: restarting");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+    }
+    return ESP_OK;
+}
+
 void weather_http_register(httpd_handle_t server)
 {
     const httpd_uri_t uris[] = {
@@ -534,6 +793,8 @@ void weather_http_register(httpd_handle_t server)
         { .uri = "/api/outdoor/events", .method = HTTP_GET, .handler = outdoor_events_get },
         { .uri = "/api/readings", .method = HTTP_GET, .handler = readings_api_get },
         { .uri = "/api/readings/history", .method = HTTP_GET, .handler = history_get },
+        { .uri = "/api/weather-station/settings", .method = HTTP_GET, .handler = ws_settings_api_get },
+        { .uri = "/api/weather-station/settings", .method = HTTP_POST, .handler = ws_settings_api_post },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         if (httpd_register_uri_handler(server, &uris[i]) != ESP_OK) {
