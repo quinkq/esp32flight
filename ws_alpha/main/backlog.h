@@ -23,10 +23,11 @@ uint16_t backlog_peek(ws_link_record_t *out, uint16_t max);
 /* Removes the n oldest records. */
 void backlog_drop(uint16_t n);
 
-/* Moves every record's timestamp by delta seconds: called when the display
- * sets the clock, so the records still waiting stay on the same time base
- * as the new clock. */
-void backlog_shift(int64_t delta);
+/* Called when the display sets the clock, so the records still waiting stay
+ * on the same time base as the new clock: delta is new minus old, set_at the
+ * clock's value when it was last set (0: not since power-on), now its old
+ * value. Each record moves by its share of delta (ws_link_correct_ts()). */
+void backlog_shift(int64_t delta, uint32_t set_at, uint32_t now);
 
 /* Records were lost (full backlog or a lost time base) since the flag was
  * last cleared, i.e. since the last successful exchange. */

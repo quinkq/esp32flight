@@ -5,7 +5,8 @@
  * planning notes).
  *
  *  - The link task does all the writing: frames, rejections and the
- *    housekeeping tick. outdoor_link_health() and outdoor_link_events() hand
+ *    housekeeping tick; other tasks only add events (outdoor_link_event(),
+ *    the indoor sensor). outdoor_link_health() and outdoor_link_events() hand
  *    copies to other tasks, taken under a mutex, never in a critical section
  *    (the 7B's panel needs its interrupts).
  *  - The status runs on uptime, and the reading counters on the outdoor
@@ -24,6 +25,7 @@
 #include <unistd.h>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -31,14 +33,19 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "outdoor_link.h"
+#include "readings_store.h"
 
 static const char *TAG = "outdoor_link";
 
-#define LOG_MAX_BYTES  (64 * 1024)      /* then renamed to .old, as upstream's alerts.tsv */
+#define LOG_MAX_BYTES  (16 * 1024)      /* then renamed to .old, as upstream's alerts.tsv;
+                                           small: /assets is nearly full (DISPLAY.md, Storage) */
+#define SPACE_LOW_KB   100              /* free in /assets below this: an event */
+#define SPACE_OK_KB    150              /* and again only after it rose above this */
 #define EVENTS         32               /* kept in RAM: the newest, and any not yet written */
 #define BACKLOG_SPAN_S (2 * 24 * 3600)  /* the outdoor unit's backlog never spans more */
 #define SAME_WAKE_S    5                /* frames this close on its clock come from one wake */
 #define SENSOR_RUN     3                /* readings in a row before a sensor counts as lost or back */
+#define DRIFT_SPAN_S   3600             /* report its clock's rate after this long without a sync */
 
 typedef struct {
     int64_t up_us;                      /* esp_timer time of the event */
@@ -76,6 +83,9 @@ static bool s_rejecting;                /* inside a burst of rejected frames */
 static bool s_sht_ok = true, s_bme_ok = true;
 static uint8_t s_sht_run, s_bme_run;
 static bool s_file_warned;
+static bool s_space_low;
+static readings_store_state_t s_store_state;
+static bool s_store_failing;
 
 static bool have_time(time_t *now)
 {
@@ -279,9 +289,10 @@ static void sensor(const char *name, bool ok, bool *state, uint8_t *run, uint32_
     }
 }
 
-/* One reading of an answered frame; false if it was counted before. */
+/* One reading of an answered frame; false if it was counted before. *late:
+ * it comes from the backlog. */
 static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t gap_s,
-                    uint32_t *late, uint32_t *missing)
+                    bool *late, uint32_t *missing)
 {
     if (s_have_ts && r->ts <= s_last_ts && s_last_ts - r->ts <= BACKLOG_SPAN_S) {
         return false;                   /* the outdoor unit missed our reply and sent it again */
@@ -299,9 +310,7 @@ static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t ga
 
     /* its age when sent, both times from its own clock */
     const uint32_t age = outdoor_now > r->ts ? outdoor_now - r->ts : 0;
-    if (2 * age > 2 * gap_s - s_interval_s) {
-        (*late)++;
-    }
+    *late = 2 * age > 2 * gap_s - s_interval_s;
     if (r->bat_mv != WS_LINK_NO_U16) {
         if (s_day.bat_max == 0) {
             s_day.bat_min = s_day.bat_max = r->bat_mv;
@@ -330,13 +339,15 @@ bool outdoor_health_init(uint32_t interval_s)
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_h.running = true;
     s_h.expected_gap_s = interval_s;
+    s_h.assets_free_kb = -1;
     xSemaphoreGive(s_mux);
     return true;
 }
 
 void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, int8_t rssi,
-                          bool answered)
+                          bool answered, outdoor_marks_t *marks)
 {
+    *marks = (outdoor_marks_t){0};
     const int64_t now_us = esp_timer_get_time();
     time_t now;
     const bool dated = have_time(&now);
@@ -363,8 +374,14 @@ void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, i
         if (!answered) {
             continue;                   /* it comes again with the next wake */
         }
-        if (reading(&r, f->outdoor_now, gap_s, &late, &missing)) {
+        bool is_late = false;
+        if (reading(&r, f->outdoor_now, gap_s, &is_late, &missing)) {
             readings++;
+            marks->fresh |= 1u << i;
+            if (is_late) {
+                late++;
+                marks->late |= 1u << i;
+            }
         } else {
             twice++;
         }
@@ -452,6 +469,16 @@ void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, i
     if (missing != 0) {
         event("missing", "%lu readings never arrived", (unsigned long)missing);
     }
+    /* after a long gap the offset shows how fast or slow its clock runs */
+    if (dated && synced && f->clock_set_at != 0 && f->outdoor_now > f->clock_set_at &&
+        f->outdoor_now - f->clock_set_at >= DRIFT_SPAN_S) {
+        const int64_t off = (int64_t)now - f->outdoor_now;
+        const int64_t size = off < 0 ? -off : off;
+        const uint32_t span = f->outdoor_now - f->clock_set_at;
+        event("clock", "its clock was %lld s %s after %lu h %lu min without a sync (%.2f %%)",
+              (long long)size, off < 0 ? "fast" : "slow", (unsigned long)(span / 3600),
+              (unsigned long)(span % 3600 / 60), 100.0 * (double)size / span);
+    }
 }
 
 void outdoor_health_rejected(const char *why)
@@ -497,8 +524,36 @@ void outdoor_health_tick(void)
     const uint8_t old = s_h.channel;
     const uint8_t ch = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.primary : old;
 
+    /* free space where the event log and, later, the store live */
+    size_t total = 0, used = 0;
+    const int32_t free_kb = esp_spiffs_info("assets", &total, &used) == ESP_OK && total >= used
+                          ? (int32_t)((total - used) / 1024) : -1;
+    if (free_kb >= 0 && free_kb < SPACE_LOW_KB && !s_space_low) {
+        s_space_low = true;
+        event("space", "only %ld KB free in /assets (of %u KB)", (long)free_kb, (unsigned)(total / 1024));
+    } else if (free_kb > SPACE_OK_KB) {
+        s_space_low = false;
+    }
+
+    /* the readings store: why it can't use flash, or flash writes failing */
+    readings_store_info_t si;
+    readings_store_info(&si);
+    if (si.state != s_store_state) {
+        s_store_state = si.state;
+        if (si.state == READINGS_RAM_ONLY) {
+            event("store", "readings stay in RAM and are lost at a restart: %s", si.why);
+        }
+    }
+    if (si.write_failing && !s_store_failing) {
+        event("store", "can't write the readings to flash: they wait in RAM");
+    } else if (!si.write_failing && s_store_failing) {
+        event("store", "readings written to flash again");
+    }
+    s_store_failing = si.write_failing;
+
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_h.status = status;
+    s_h.assets_free_kb = free_kb;
     if (ch != old) {
         s_h.channel = ch;
         s_h.channel_changes += old != 0;
@@ -524,6 +579,11 @@ void outdoor_link_health(outdoor_health_t *out)
     out->replies_unacked = __atomic_load_n(&s_unacked, __ATOMIC_RELAXED);
     out->status = status_of(out, now_us);
     out->uptime_s = (uint32_t)(now_us / 1000000);
+}
+
+void outdoor_link_event(const char *kind, const char *text)
+{
+    event(kind, "%s", text);
 }
 
 size_t outdoor_link_events(outdoor_event_t *out, size_t max)

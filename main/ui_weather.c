@@ -39,7 +39,7 @@ typedef struct {
     const char *status[4];                 /* in outdoor_status_t order */
     const char *last_heard, *next, *overdue; /* %s: a duration */
     const char *battery, *no_reading, *low, *signal, *sensors;
-    const char *firmware, *build, *clock, *synced, *not_set, *channel;
+    const char *firmware, *build, *clock, *synced, *not_set, *channel, *space;
     const char *frame, *started, *overflow, *counts, *events, *no_events;
     const char *reset[16];                 /* esp_reset_reason_t */
 } strings_t;
@@ -56,6 +56,7 @@ static const strings_t k_en = {
     .signal = "Signal", .sensors = "Sensors",
     .firmware = "Firmware", .build = "build %u",
     .clock = "Clock", .synced = "synced", .not_set = "not set", .channel = "Channel",
+    .space = "Free space",
     .frame = "Last frame: %u readings · since its previous frame: awake %lu ms, "
              "%u failed searches, %u resets, %u brownouts",
     .started = " · started by: %s",
@@ -81,6 +82,7 @@ static const strings_t k_pl = {
     .signal = "Sygnał", .sensors = "Czujniki",
     .firmware = "Oprogramowanie", .build = "wersja %u",
     .clock = "Zegar", .synced = "zsynchronizowany", .not_set = "nieustawiony", .channel = "Kanał",
+    .space = "Wolne miejsce",
     .frame = "Ostatnia ramka: odczyty %u · od poprzedniej: czas pracy %lu ms, "
              "nieudane wyszukiwania %u, resety %u, spadki napięcia %u",
     .started = " · uruchomienie: %s",
@@ -103,7 +105,7 @@ static const strings_t *S(void)
 
 /* the settings tab's widgets; one tab at a time */
 static struct {
-    lv_obj_t *status, *bat, *sig, *sensors, *fw, *clock, *chan, *frame, *counts, *events;
+    lv_obj_t *status, *bat, *sig, *sensors, *fw, *clock, *chan, *space, *frame, *counts, *events;
     lv_timer_t *timer;
     outdoor_event_t *ev;                   /* TAB_EVENTS, then EVENTS_TEXT chars; PSRAM */
     char *text;
@@ -205,6 +207,11 @@ static void refresh(lv_timer_t *timer)
         snprintf(buf, sizeof(buf), "%u", h.channel);
         lv_label_set_text(s_tab.chan, buf);
     }
+    if (h.assets_free_kb >= 0) {
+        snprintf(buf, sizeof(buf), h.assets_free_kb < 100 ? "#ff6b6b %ld KB#" : "%ld KB",
+                 (long)h.assets_free_kb);
+        lv_label_set_text(s_tab.space, buf);
+    }
 
     dur(d, sizeof(d), h.uptime_s);
     snprintf(buf, sizeof(buf), str->counts, d, (unsigned long)h.frames, (unsigned long)h.rejected,
@@ -305,6 +312,7 @@ void ui_weather_settings_tab(lv_obj_t *page)
     s_tab.fw = card(row, str->firmware);
     s_tab.clock = card(row, str->clock);
     s_tab.chan = card(row, str->channel);
+    s_tab.space = card(row, str->space);
 
     s_tab.frame = text(box, UIFONT(&font_pl_14, &font_pl_8), COL_TEXT);
     s_tab.counts = text(box, UIFONT(&font_pl_14, &font_pl_8), COL_TEXT);

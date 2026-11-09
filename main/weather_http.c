@@ -1,22 +1,32 @@
 /*
- * The weather station on the panel's web server (weather-station fork). For
- * now the outdoor unit's diagnostics; the readings follow with the store.
- * Every handler checks the panel password, like the rest of the panel.
+ * The weather station on the panel's web server (weather-station fork): the
+ * outdoor unit's diagnostics and the stored readings. Every handler checks
+ * the panel password, like the rest of the panel.
  *
  *   GET /outdoor                       a small page that refreshes itself
  *   GET /api/outdoor                   the outdoor unit as the display sees it, JSON
  *   GET /api/outdoor/events?since=T    the event log after unix time T, tab-separated
+ *   GET /api/readings                  the newest stored outdoor slot (raw values), the indoor
+ *                                      sensor's latest sample and the store's state, JSON
+ *   GET /api/readings/history?cursor=C&since=T&fmt=json|csv|influx
+ *                                      the slots changed since cursor C (none: all) with ts > T,
+ *                                      oldest first; the next cursor in the X-Cursor header (and
+ *                                      in the JSON). Raw values until the calibration settings.
  */
 #include "weather_http.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "indoor.h"
 #include "outdoor_link.h"
+#include "readings_store.h"
 #include "web_server.h"
 
 static const char *TAG = "weather_http";
@@ -75,7 +85,8 @@ static const char OUTDOOR_HTML[] =
 "card('Sensors',ok('SHT40',f.sht_ok)+' &nbsp;'+ok('BME280',f.bme_ok))+"
 "card('Firmware','build '+f.fw_build)+"
 "card('Clock',(f.clock_synced?'synced':'not set')+(f.clock_offset_s==null?'':', '+(f.clock_offset_s>=0?'+':'')+f.clock_offset_s+' s'))+"
-"card('Channel',c.channel||'&ndash;');"
+"card('Channel',c.channel||'&ndash;')+"
+"card('Free space',d.assets_free_kb==null?'&ndash;':'<span class='+(d.assets_free_kb<100?'bad':'')+'>'+d.assets_free_kb+' KB</span>');"
 "$('frame').innerHTML='Last frame: '+f.records+' reading'+(f.records==1?'':'s')"
 "+(f.reset_reason!=8?' &middot; it started by '+(R[f.reset_reason]||'reset '+f.reset_reason):'')"
 "+(f.backlog_dropped?' &middot; <span class=bad>its backlog overflowed</span>':'')"
@@ -168,6 +179,11 @@ static esp_err_t outdoor_api_get(httpd_req_t *req)
     cJSON_AddNumberToObject(c, "twice", h.twice);
     cJSON_AddNumberToObject(c, "channel", h.channel);
     cJSON_AddNumberToObject(c, "channel_changes", h.channel_changes);
+    if (h.assets_free_kb >= 0) {
+        cJSON_AddNumberToObject(root, "assets_free_kb", h.assets_free_kb);
+    } else {
+        cJSON_AddNullToObject(root, "assets_free_kb");
+    }
 
     /* from RAM, so they show before the display has time to write them */
     cJSON *events = cJSON_AddArrayToObject(root, "events");
@@ -227,12 +243,297 @@ static esp_err_t outdoor_events_get(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static const char *store_state_name(readings_store_state_t s)
+{
+    switch (s) {
+    case READINGS_FLASH:
+        return "flash";
+    case READINGS_RAM_ONLY:
+        return "ram only";
+    default:
+        return "off";
+    }
+}
+
+/* a value in its unit, or null when it's missing */
+static void add_value(cJSON *o, const char *key, bool ok, double v)
+{
+    if (ok) {
+        cJSON_AddNumberToObject(o, key, v);
+    } else {
+        cJSON_AddNullToObject(o, key);
+    }
+}
+
+static esp_err_t readings_api_get(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    readings_store_info_t si;
+    readings_store_info(&si);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *st = cJSON_AddObjectToObject(root, "store");
+    cJSON_AddStringToObject(st, "state", store_state_name(si.state));
+    if (si.state == READINGS_RAM_ONLY) {
+        cJSON_AddStringToObject(st, "why", si.why);
+    }
+    cJSON_AddBoolToObject(st, "write_failing", si.write_failing);
+    cJSON_AddNumberToObject(st, "slots", si.slots);
+    cJSON_AddNumberToObject(st, "unwritten", si.unwritten);
+    add_value(st, "oldest", si.oldest != 0, si.oldest);
+    add_value(st, "newest", si.newest != 0, si.newest);
+
+    readings_slot_t s;
+    if (readings_store_latest(&s)) {
+        /* raw: calibration comes with the settings */
+        cJSON *o = cJSON_AddObjectToObject(root, "outdoor");
+        const bool sht = s.flags & READINGS_SHT_OK, bme = s.flags & READINGS_BME_OK;
+        cJSON_AddNumberToObject(o, "ts", s.ts);
+        add_value(o, "sht_t", sht, s.sht_t / 100.0);
+        add_value(o, "sht_rh", sht, s.sht_rh / 100.0);
+        add_value(o, "bme_t", bme, s.bme_t / 100.0);
+        add_value(o, "bme_rh", bme, s.bme_rh / 100.0);
+        add_value(o, "bme_p", bme, s.bme_p / 10.0);
+        add_value(o, "bat_mv", s.bat_mv != WS_LINK_NO_U16, s.bat_mv);
+        add_value(o, "rssi", s.rssi != READINGS_NO_RSSI, s.rssi);
+        cJSON_AddNumberToObject(o, "readings", s.count);
+        cJSON_AddBoolToObject(o, "late", s.flags & READINGS_LATE);
+        cJSON_AddBoolToObject(o, "low_battery", s.flags & READINGS_LOW_BATTERY);
+    } else {
+        cJSON_AddNullToObject(root, "outdoor");
+    }
+
+    /* the latest sample, raw; the store has the slot means */
+    indoor_t in;
+    indoor_latest(&in);
+    cJSON *i = cJSON_AddObjectToObject(root, "indoor");
+    cJSON_AddBoolToObject(i, "answering", in.answering);
+    if (in.serial != 0) {
+        char serial[12];
+        snprintf(serial, sizeof(serial), "%08lx", (unsigned long)in.serial);
+        cJSON_AddStringToObject(i, "serial", serial);
+    } else {
+        cJSON_AddNullToObject(i, "serial");
+    }
+    add_value(i, "age_s", in.have, in.age_s);
+    add_value(i, "t", in.have, in.t / 100.0);
+    add_value(i, "rh", in.have, in.rh / 100.0);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    const esp_err_t err = httpd_resp_send(req, json ? json : "{}", HTTPD_RESP_USE_STRLEN);
+    free(json);
+    return err;
+}
+
+typedef enum { FMT_JSON, FMT_CSV, FMT_INFLUX } fmt_t;
+
+#define OUT_SIZE 2048                   /* sent in chunks of up to this */
+#define OUT_PIECE 320                   /* no single piece is longer (a JSON slot: ~230) */
+
+typedef struct {
+    httpd_req_t *req;
+    fmt_t fmt;
+    bool  first;                        /* JSON: no comma before the first slot */
+    bool  failed;                       /* the client went away */
+    size_t len;
+    char  buf[OUT_SIZE];
+} out_t;
+
+static void out_flush(out_t *o)
+{
+    if (!o->failed && o->len > 0) {
+        o->failed = httpd_resp_send_chunk(o->req, o->buf, o->len) != ESP_OK;
+    }
+    o->len = 0;
+}
+
+static void out_printf(out_t *o, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+static void out_printf(out_t *o, const char *fmt, ...)
+{
+    if (OUT_SIZE - o->len < OUT_PIECE) {
+        out_flush(o);
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(o->buf + o->len, OUT_SIZE - o->len, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        o->len += (size_t)n < OUT_SIZE - o->len ? (size_t)n : OUT_SIZE - o->len - 1;
+    }
+}
+
+/* v with the given decimals, or the text for a missing value */
+static void val(char *buf, size_t n, bool ok, double v, int decimals, const char *missing)
+{
+    if (ok) {
+        snprintf(buf, n, "%.*f", decimals, v);
+    } else {
+        strlcpy(buf, missing, n);
+    }
+}
+
+/* key=value onto an Influx line's field list */
+static void add_field(char *list, size_t n, const char *key, const char *value)
+{
+    const size_t len = strlen(list);
+    snprintf(list + len, n - len, "%s%s=%s", len != 0 ? "," : "", key, value);
+}
+
+static void put_influx(out_t *o, const readings_slot_t *s)
+{
+    char v[16], f[OUT_PIECE - 32] = "";
+    if (s->flags & READINGS_SHT_OK) {
+        val(v, sizeof(v), true, s->sht_t / 100.0, 2, "");
+        add_field(f, sizeof(f), "temp_c", v);
+        val(v, sizeof(v), true, s->sht_rh / 100.0, 2, "");
+        add_field(f, sizeof(f), "rh", v);
+    }
+    if (s->flags & READINGS_BME_OK) {
+        val(v, sizeof(v), true, s->bme_t / 100.0, 2, "");
+        add_field(f, sizeof(f), "temp_bme_c", v);
+        val(v, sizeof(v), true, s->bme_rh / 100.0, 2, "");
+        add_field(f, sizeof(f), "rh_bme", v);
+        val(v, sizeof(v), true, s->bme_p / 10.0, 1, "");
+        add_field(f, sizeof(f), "pressure_hpa", v);
+    }
+    if (f[0] != '\0') {
+        out_printf(o, "ws_outdoor %s %lu\n", f, (unsigned long)s->ts);
+    }
+    if (s->flags & READINGS_INDOOR_OK) {
+        out_printf(o, "ws_indoor temp_c=%.2f,rh=%.2f %lu\n", s->in_t / 100.0, s->in_rh / 100.0,
+                   (unsigned long)s->ts);
+    }
+    f[0] = '\0';
+    if (s->bat_mv != WS_LINK_NO_U16) {
+        val(v, sizeof(v), true, s->bat_mv / 1000.0, 3, "");
+        add_field(f, sizeof(f), "bat_v", v);
+    }
+    if (s->rssi != READINGS_NO_RSSI) {
+        snprintf(v, sizeof(v), "%di", s->rssi);
+        add_field(f, sizeof(f), "rssi", v);
+    }
+    snprintf(v, sizeof(v), "%ui", s->count);
+    add_field(f, sizeof(f), "readings", v);
+    add_field(f, sizeof(f), "late", s->flags & READINGS_LATE ? "true" : "false");
+    add_field(f, sizeof(f), "low_battery", s->flags & READINGS_LOW_BATTERY ? "true" : "false");
+    out_printf(o, "ws_outdoor_unit %s %lu\n", f, (unsigned long)s->ts);
+}
+
+/* CSV and JSON share the columns; only the missing-value text and the framing differ */
+static void put_row(out_t *o, const readings_slot_t *s)
+{
+    const bool json = o->fmt == FMT_JSON;
+    const char *none = json ? "null" : "";
+    const bool sht = s->flags & READINGS_SHT_OK, bme = s->flags & READINGS_BME_OK;
+    const bool in = s->flags & READINGS_INDOOR_OK;
+    char sht_t[12], sht_rh[12], bme_t[12], bme_rh[12], bme_p[12], bat[8], rssi[8], in_t[12], in_rh[12];
+    val(sht_t, sizeof(sht_t), sht, s->sht_t / 100.0, 2, none);
+    val(sht_rh, sizeof(sht_rh), sht, s->sht_rh / 100.0, 2, none);
+    val(bme_t, sizeof(bme_t), bme, s->bme_t / 100.0, 2, none);
+    val(bme_rh, sizeof(bme_rh), bme, s->bme_rh / 100.0, 2, none);
+    val(bme_p, sizeof(bme_p), bme, s->bme_p / 10.0, 1, none);
+    val(bat, sizeof(bat), s->bat_mv != WS_LINK_NO_U16, s->bat_mv, 0, none);
+    val(rssi, sizeof(rssi), s->rssi != READINGS_NO_RSSI, s->rssi, 0, none);
+    val(in_t, sizeof(in_t), in, s->in_t / 100.0, 2, none);
+    val(in_rh, sizeof(in_rh), in, s->in_rh / 100.0, 2, none);
+    const bool late = s->flags & READINGS_LATE, low = s->flags & READINGS_LOW_BATTERY;
+    if (json) {
+        out_printf(o, "%s{\"ts\":%lu,\"sht_t\":%s,\"sht_rh\":%s,\"bme_t\":%s,\"bme_rh\":%s,\"bme_p\":%s,"
+                      "\"bat_mv\":%s,\"rssi\":%s,\"readings\":%u,\"late\":%s,\"low_battery\":%s,"
+                      "\"in_t\":%s,\"in_rh\":%s}",
+                   o->first ? "" : ",", (unsigned long)s->ts, sht_t, sht_rh, bme_t, bme_rh, bme_p, bat, rssi,
+                   s->count, late ? "true" : "false", low ? "true" : "false", in_t, in_rh);
+        o->first = false;
+    } else {
+        char when[24];
+        const time_t t = s->ts;
+        struct tm tm;
+        gmtime_r(&t, &tm);
+        strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tm);
+        out_printf(o, "%lu,%s,%s,%s,%s,%s,%s,%s,%s,%u,%d,%d,%s,%s\n", (unsigned long)s->ts, when, sht_t, sht_rh,
+                   bme_t, bme_rh, bme_p, bat, rssi, s->count, late, low, in_t, in_rh);
+    }
+}
+
+static bool put_slot(const readings_slot_t *s, void *ctx)
+{
+    out_t *o = ctx;
+    if (o->fmt == FMT_INFLUX) {
+        put_influx(o, s);
+    } else {
+        put_row(o, s);
+    }
+    return !o->failed;
+}
+
+static esp_err_t history_get(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    char query[128], cursor[READINGS_CURSOR_LEN] = "", v[16];
+    uint32_t since = 0;
+    fmt_t fmt = FMT_JSON;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "cursor", cursor, sizeof(cursor)) != ESP_OK) {
+            cursor[0] = '\0';
+        }
+        if (httpd_query_key_value(query, "since", v, sizeof(v)) == ESP_OK) {
+            since = strtoul(v, NULL, 10);
+        }
+        if (httpd_query_key_value(query, "fmt", v, sizeof(v)) == ESP_OK) {
+            if (strcmp(v, "csv") == 0) {
+                fmt = FMT_CSV;
+            } else if (strcmp(v, "influx") == 0) {
+                fmt = FMT_INFLUX;
+            } else if (strcmp(v, "json") != 0) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "fmt: json, csv or influx");
+            }
+        }
+    }
+    out_t *o = heap_caps_calloc(1, sizeof(*o), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (o == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+    }
+    o->req = req;
+    o->fmt = fmt;
+    o->first = true;
+
+    /* before the slots: one that changes meanwhile comes again next time */
+    char next[READINGS_CURSOR_LEN];
+    readings_store_cursor(next);
+    httpd_resp_set_hdr(req, "X-Cursor", next);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_type(req, fmt == FMT_JSON ? "application/json"
+                           : fmt == FMT_CSV ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8");
+    if (fmt == FMT_JSON) {
+        out_printf(o, "{\"cursor\":\"%s\",\"slots\":[", next);
+    } else if (fmt == FMT_CSV) {
+        out_printf(o, "ts,time,sht_t,sht_rh,bme_t,bme_rh,bme_p,bat_mv,rssi,readings,late,low_battery,in_t,in_rh\n");
+    }
+    readings_store_changed(cursor, since, put_slot, o);
+    if (fmt == FMT_JSON) {
+        out_printf(o, "]}");
+    }
+    out_flush(o);
+    const bool failed = o->failed;
+    free(o);
+    return failed ? ESP_FAIL : httpd_resp_send_chunk(req, NULL, 0);
+}
+
 void weather_http_register(httpd_handle_t server)
 {
     const httpd_uri_t uris[] = {
         { .uri = "/outdoor", .method = HTTP_GET, .handler = outdoor_page_get },
         { .uri = "/api/outdoor", .method = HTTP_GET, .handler = outdoor_api_get },
         { .uri = "/api/outdoor/events", .method = HTTP_GET, .handler = outdoor_events_get },
+        { .uri = "/api/readings", .method = HTTP_GET, .handler = readings_api_get },
+        { .uri = "/api/readings/history", .method = HTTP_GET, .handler = history_get },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         if (httpd_register_uri_handler(server, &uris[i]) != ESP_OK) {

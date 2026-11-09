@@ -20,7 +20,7 @@
 #include <stdint.h>
 
 #define WS_LINK_MAGIC              0x5357  /* bytes 'W','S' on the wire */
-#define WS_LINK_VERSION            3
+#define WS_LINK_VERSION            4
 
 #define WS_LINK_MAX_PAYLOAD        250     /* ESP-NOW v1 */
 #define WS_LINK_MAX_RECORDS        13      /* per READINGS frame */
@@ -75,6 +75,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     ws_link_hdr_t hdr;         /* type = WS_LINK_READINGS */
     uint32_t outdoor_now;      /* outdoor unit's clock when the frame was sent */
+    uint32_t clock_set_at;     /* its clock when a reply last set it; 0: not since power-on */
     uint16_t fw_build;         /* outdoor unit's firmware build number */
     uint8_t  reset_reason;     /* esp_reset_reason() of the current boot */
     uint8_t  flags;            /* WS_OUTDOOR_* */
@@ -106,10 +107,28 @@ typedef struct __attribute__((packed)) {
 #define WS_LINK_REPLY_SIZE         offsetof(ws_link_reply_t, ota_ip)
 #define WS_LINK_REPLY_OTA_SIZE     sizeof(ws_link_reply_t)
 
+/* A reading's time on the right time base. The outdoor unit's clock runs at
+ * a slightly wrong but steady rate (0.76 % fast on the bench), so its error
+ * grows from 0 when a reply set it (set_at, on its own clock) to offset
+ * (right time minus its clock) at now. Readings from before set_at need
+ * nothing; with set_at 0 (not set since power-on) every reading moves by the
+ * whole offset. Both sides use this: the display for the frame it gets
+ * before its reply, the outdoor unit for its backlog when a reply sets its
+ * clock. */
+static inline uint32_t ws_link_correct_ts(uint32_t ts, int64_t offset, uint32_t set_at, uint32_t now)
+{
+    int64_t shift = offset;
+    if (set_at != 0 && now > set_at) {
+        shift = ts <= set_at ? 0 : offset * (int64_t)(ts - set_at) / (int64_t)(now - set_at);
+    }
+    const int64_t t = (int64_t)ts + shift;
+    return t < 0 ? 0 : t > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)t;
+}
+
 /* the wire format: any change here is a protocol change (bump the version) */
 _Static_assert(sizeof(ws_link_hdr_t) == 6, "ws_link_hdr_t must be 6 bytes");
 _Static_assert(sizeof(ws_link_record_t) == 17, "ws_link_record_t must be 17 bytes");
-_Static_assert(sizeof(ws_link_readings_t) == 22, "ws_link_readings_t header must be 22 bytes");
+_Static_assert(sizeof(ws_link_readings_t) == 26, "ws_link_readings_t header must be 26 bytes");
 _Static_assert(WS_LINK_READINGS_SIZE(WS_LINK_MAX_RECORDS) <= WS_LINK_MAX_PAYLOAD,
                "a full READINGS frame must fit one ESP-NOW payload");
 _Static_assert(WS_LINK_REPLY_SIZE == 13, "REPLY without OTA must be 13 bytes");

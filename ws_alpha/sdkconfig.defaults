@@ -26,3 +26,8 @@ CONFIG_FREERTOS_HZ=1000
 # firmware's own modules raise themselves back to INFO in app_main.
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+
+# The slow clock that keeps time in deep sleep. The default 136 kHz RC ran
+# 0.76 % fast on the bench (11 min a day); the 17.5 MHz oscillator / 256 is
+# steadier, for about 5 uA more while asleep.
+CONFIG_RTC_CLK_SRC_INT_8MD256=y
