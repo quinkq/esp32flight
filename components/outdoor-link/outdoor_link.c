@@ -33,10 +33,12 @@ static const char *TAG = "outdoor_link";
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "outdoor_health.h"
@@ -45,7 +47,10 @@ static const char *TAG = "outdoor_link";
 #include "ws_settings.h"
 
 #define TASK_PRIORITY    5            /* above the app's tasks (3-4): the outdoor unit waits 100 ms */
-#define TASK_STACK       6144         /* internal RAM; the daily summary logs how much is unused */
+#define TASK_STACK       6144         /* in PSRAM, like the queue: the 7B's internal RAM is too
+                                         scarce (upstream's peaks ran it down to 2.7 KB free).
+                                         Allowed here: this build keeps the caches on during
+                                         flash writes. The daily summary logs how much is unused. */
 #define HOUSEKEEPING_MS  30000
 #define BURST_MS         1000         /* quiet this long after a frame: the burst is over */
 #define FUTURE_S         3600         /* a reading dated later than this past the display's time isn't stored */
@@ -250,7 +255,7 @@ void outdoor_link_start(void)
     memcpy(peer.peer_addr, s_peer, sizeof(peer.peer_addr));
     memcpy(peer.lmk, cfg.lmk, sizeof(peer.lmk));
 
-    s_rx = xQueueCreate(4, sizeof(rx_item_t));
+    s_rx = xQueueCreateWithCaps(4, sizeof(rx_item_t), MALLOC_CAP_SPIRAM);
     esp_err_t err = ESP_ERR_NO_MEM;
     if (!s_rx ||
         (err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK ||
@@ -263,7 +268,7 @@ void outdoor_link_start(void)
         return;
     }
     if (!outdoor_health_init(cfg.interval_s) ||
-        xTaskCreate(rx_task, "outdoor_link", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+        xTaskCreateWithCaps(rx_task, "outdoor_link", TASK_STACK, NULL, TASK_PRIORITY, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "no memory for the task; link off");
         esp_now_deinit();
         return;

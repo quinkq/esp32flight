@@ -25,9 +25,11 @@
 
 #include <time.h>
 #include "driver/i2c.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "outdoor_link.h"
@@ -46,7 +48,9 @@ static const char *TAG = "indoor";
 #define SAMPLE_MS        60000
 #define RUN              3              /* samples in a row before it counts as lost or back */
 #define CLOCK_VALID_FROM 1767225600     /* 2026-01-01, as in outdoor-link: earlier means no time yet */
-#define TASK_STACK       4096
+#define TASK_STACK       4096           /* in PSRAM: internal RAM is scarce on the 7B (the I2C
+                                           driver isn't installed for IRAM interrupts, and flash
+                                           writes keep the caches on in this build) */
 #define TASK_PRIORITY    2
 
 static SemaphoreHandle_t s_mux;         /* guards s_latest and s_latest_us */
@@ -189,7 +193,8 @@ static void task(void *arg)
 void indoor_start(void)
 {
     s_mux = xSemaphoreCreateMutex();
-    if (s_mux == NULL || xTaskCreate(task, "indoor", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+    if (s_mux == NULL ||
+        xTaskCreateWithCaps(task, "indoor", TASK_STACK, NULL, TASK_PRIORITY, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "no memory for the indoor sensor's task");
         s_latest.answering = false;
     }

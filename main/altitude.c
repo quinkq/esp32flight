@@ -9,7 +9,10 @@
  *    the touchscreen's city search (the city centre): an IP-based location
  *    can be kilometres off, and in hilly places that's a big error.
  *  - Upstream restarts the display when its settings change, so a check at
- *    boot catches every new home location.
+ *    boot catches every new home location. Normally the altitude is cached
+ *    and nothing more happens; only a lookup gets a task, with its stack in
+ *    PSRAM (the 7B's internal RAM is scarce: an 8 KB stack taken and freed at
+ *    every boot left a hole that upstream's own peaks then missed).
  */
 #include "altitude.h"
 
@@ -17,8 +20,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "http_util.h"
 #include "settings.h"
@@ -29,7 +34,7 @@ static const char *TAG = "altitude";
 #define SAME_E5       20                /* within this (×1e-5 degrees, ~20 m): the same place */
 #define RETRY_MS      (10 * 60 * 1000)  /* after a failed lookup */
 #define LOOKUP_MS     8000
-#define TASK_STACK    8192              /* TLS */
+#define TASK_STACK    8192              /* TLS; in PSRAM */
 #define TASK_PRIORITY 2
 
 static int32_t e5(double deg)
@@ -62,7 +67,7 @@ static bool lookup(double lat, double lon, int16_t *m)
 {
     char url[128];
     snprintf(url, sizeof(url), "https://api.open-meteo.com/v1/elevation?latitude=%.5f&longitude=%.5f", lat, lon);
-    char *buf = malloc(512);
+    char *buf = heap_caps_malloc(512, MALLOC_CAP_SPIRAM);
     if (buf == NULL) {
         return false;
     }
@@ -80,35 +85,48 @@ static bool lookup(double lat, double lon, int16_t *m)
     return ok;
 }
 
+/* Nothing to look up: no fixed home location, or its altitude is cached. */
+static bool settled(bool log)
+{
+    const settings_t *home = settings_get();
+    if (!home->use_fixed_loc) {
+        if (log) {
+            ESP_LOGI(TAG, "home location by IP address: pressure stays as measured");
+        }
+        return true;
+    }
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
+    if (cfg.alt_known && same_place(cfg.alt_lat_e5, cfg.alt_lon_e5, e5(home->lat), e5(home->lon))) {
+        if (log) {
+            ESP_LOGI(TAG, "%d m at %.5f, %.5f (looked up before)", cfg.alt_m, home->lat, home->lon);
+        }
+        return true;
+    }
+    return false;
+}
+
 static void task(void *arg)
 {
-    for (;;) {
+    while (!settled(false)) {
         const settings_t *home = settings_get();
-        if (!home->use_fixed_loc) {
-            ESP_LOGI(TAG, "home location by IP address: pressure stays as measured");
-            break;
-        }
-        const int32_t lat = e5(home->lat), lon = e5(home->lon);
-        ws_settings_t cfg;
-        ws_settings_get(&cfg);
-        if (cfg.alt_known && same_place(cfg.alt_lat_e5, cfg.alt_lon_e5, lat, lon)) {
-            ESP_LOGI(TAG, "%d m at %.5f, %.5f (looked up before)", cfg.alt_m, home->lat, home->lon);
-            break;
-        }
         int16_t m;
         if (wifi_mgr_wait_connected(60000) && lookup(home->lat, home->lon, &m)) {
-            ws_settings_set_altitude(m, lat, lon);
+            ws_settings_set_altitude(m, e5(home->lat), e5(home->lon));
             ESP_LOGI(TAG, "%d m at %.5f, %.5f (Open-Meteo)", m, home->lat, home->lon);
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);          /* frees the PSRAM stack too */
 }
 
 void altitude_start(void)
 {
-    if (xTaskCreate(task, "altitude", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+    if (settled(true)) {
+        return;
+    }
+    if (xTaskCreateWithCaps(task, "altitude", TASK_STACK, NULL, TASK_PRIORITY, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGW(TAG, "no memory for the lookup; pressure stays as measured");
     }
 }
