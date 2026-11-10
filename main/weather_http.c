@@ -95,7 +95,7 @@ static const char OUTDOOR_HTML[] =
 "<fieldset><legend>Measurements</legend>"
 "<label>The outdoor unit measures every <input id='s_int' type=number step=1 max=360> minutes (3 to 360)</label>"
 "<label><input type=checkbox id='s_in'> indoor sensor on</label></fieldset>"
-"<fieldset><legend>Calibration</legend>"
+"<fieldset><legend>Calibration offsets</legend>"
 "<label>Outdoor temperature <input id='s_ot' type=number step=0.1 min=-5 max=5> &deg;C</label>"
 "<label>Outdoor humidity <input id='s_orh' type=number step=0.1 min=-10 max=10> %</label>"
 "<label>Indoor temperature <input id='s_it' type=number step=0.1 min=-5 max=5> &deg;C</label>"
