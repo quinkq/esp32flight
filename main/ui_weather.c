@@ -186,7 +186,7 @@ static const strings_t k_pl = {
     .every = "Pomiar co",
     .hours = "godz.",
     .indoor = "Czujnik wewnętrzny",
-    .offsets = "Poprawki",
+    .offsets = "Korekcje",
     .step = { "Temperatura zewnątrz", "Wilgotność zewnątrz", "Temperatura wewnątrz",
               "Wilgotność wewnątrz", "Napięcie baterii" },
     .cal_hint = "Dodawane do pomiarów czujników; obejmują też całą historię. "
