@@ -42,7 +42,8 @@ static const char *TAG = "outdoor_link";
 #define SPACE_LOW_KB   100              /* free in /assets below this: an event */
 #define SPACE_OK_KB    150              /* and again only after it rose above this */
 #define EVENTS         32               /* kept in RAM: the newest, and any not yet written */
-#define BACKLOG_SPAN_S (2 * 24 * 3600)  /* the outdoor unit's backlog never spans more */
+#define BACKLOG_RECORDS 192             /* the outdoor unit's backlog (ws_alpha's BACKLOG_CAPACITY) */
+#define BACKLOG_MIN_S  (2 * 24 * 3600)  /* its span counts as at least this, even at short intervals */
 #define SAME_WAKE_S    5                /* frames this close on its clock come from one wake */
 #define SENSOR_RUN     3                /* readings in a row before a sensor counts as lost or back */
 #define DRIFT_SPAN_S   3600             /* report its clock's rate after this long without a sync */
@@ -289,15 +290,24 @@ static void sensor(const char *name, bool ok, bool *state, uint8_t *run, uint32_
     }
 }
 
+/* How far back the outdoor unit's backlog can reach: a jump beyond it is a
+ * changed clock, not missing readings. */
+static uint32_t backlog_span_s(void)
+{
+    const uint32_t span = BACKLOG_RECORDS * s_interval_s;
+    return span > BACKLOG_MIN_S ? span : BACKLOG_MIN_S;
+}
+
 /* One reading of an answered frame; false if it was counted before. *late:
  * it comes from the backlog. */
 static bool reading(const ws_link_record_t *r, uint32_t outdoor_now, uint32_t gap_s,
                     bool *late, uint32_t *missing)
 {
-    if (s_have_ts && r->ts <= s_last_ts && s_last_ts - r->ts <= BACKLOG_SPAN_S) {
+    const uint32_t span = backlog_span_s();
+    if (s_have_ts && r->ts <= s_last_ts && s_last_ts - r->ts <= span) {
         return false;                   /* the outdoor unit missed our reply and sent it again */
     }
-    if (s_have_ts && r->ts > s_last_ts && r->ts - s_last_ts <= BACKLOG_SPAN_S) {
+    if (s_have_ts && r->ts > s_last_ts && r->ts - s_last_ts <= span) {
         const uint32_t step = r->ts - s_last_ts;
         if (2 * step > 3 * s_interval_s) {
             *missing += (step + s_interval_s / 2) / s_interval_s - 1;
@@ -342,6 +352,11 @@ bool outdoor_health_init(uint32_t interval_s)
     s_h.assets_free_kb = -1;
     xSemaphoreGive(s_mux);
     return true;
+}
+
+void outdoor_health_set_interval(uint32_t interval_s)
+{
+    s_interval_s = interval_s;          /* the link task's own, like the counters */
 }
 
 void outdoor_health_frame(const ws_link_readings_t *f, const uint8_t *records, int8_t rssi,

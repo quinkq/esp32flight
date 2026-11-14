@@ -4,9 +4,9 @@ menu "ws_alpha"
         prompt "Measurement interval until the display sets one"
         default WS_ALPHA_INTERVAL_900
         help
-            The display stores data on a 15-minute grid, so the interval must
-            divide 900 s. Wakes are aligned to multiples of it. One minute is
-            handy on the bench.
+            From power-on to the display's first reply; after that the display
+            decides (1 minute to 6 hours). Wakes are aligned to multiples of
+            it. One minute is handy on the bench.
 
         config WS_ALPHA_INTERVAL_60
             bool "1 minute (bench)"

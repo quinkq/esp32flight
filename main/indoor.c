@@ -13,6 +13,8 @@
  *    time, samples only update the latest value.
  *  - Lost after 3 failed samples in a row, back after 3 good ones: an
  *    "indoor" event in the weather station's event log.
+ *  - Switched off in the weather station settings: no samples, the
+ *    half-filled slot dropped; back on, it starts afresh.
  */
 #include "indoor.h"
 
@@ -23,14 +25,17 @@
 
 #include <time.h>
 #include "driver/i2c.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "outdoor_link.h"
 #include "readings_store.h"
 #include "waveshare_rgb_lcd_port.h"
+#include "ws_settings.h"
 
 static const char *TAG = "indoor";
 
@@ -43,11 +48,13 @@ static const char *TAG = "indoor";
 #define SAMPLE_MS        60000
 #define RUN              3              /* samples in a row before it counts as lost or back */
 #define CLOCK_VALID_FROM 1767225600     /* 2026-01-01, as in outdoor-link: earlier means no time yet */
-#define TASK_STACK       4096
+#define TASK_STACK       4096           /* in PSRAM: internal RAM is scarce on the 7B (the I2C
+                                           driver isn't installed for IRAM interrupts, and flash
+                                           writes keep the caches on in this build) */
 #define TASK_PRIORITY    2
 
 static SemaphoreHandle_t s_mux;         /* guards s_latest and s_latest_us */
-static indoor_t s_latest = { .answering = true };
+static indoor_t s_latest = { .on = true, .answering = true };
 static int64_t s_latest_us;
 
 /* the task's own */
@@ -124,6 +131,21 @@ static void track(bool ok)
 
 static void sample(void)
 {
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_latest.on = cfg.indoor_on;
+    if (!cfg.indoor_on) {
+        s_latest.have = false;
+    }
+    xSemaphoreGive(s_mux);
+    if (!cfg.indoor_on) {
+        s_slot = 0;                     /* the half-filled slot is dropped */
+        s_n = 0;
+        s_run = 0;
+        return;
+    }
+
     uint8_t d[6];
     const bool ok = command(CMD_MEASURE, MEASURE_MS, d);
     track(ok);
@@ -171,7 +193,8 @@ static void task(void *arg)
 void indoor_start(void)
 {
     s_mux = xSemaphoreCreateMutex();
-    if (s_mux == NULL || xTaskCreate(task, "indoor", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+    if (s_mux == NULL ||
+        xTaskCreateWithCaps(task, "indoor", TASK_STACK, NULL, TASK_PRIORITY, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "no memory for the indoor sensor's task");
         s_latest.answering = false;
     }

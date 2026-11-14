@@ -24,7 +24,7 @@
 
 #define WS_LINK_MAX_PAYLOAD        250     /* ESP-NOW v1 */
 #define WS_LINK_MAX_RECORDS        13      /* per READINGS frame */
-#define WS_LINK_DEFAULT_INTERVAL_S 900     /* intervals must divide 900 */
+#define WS_LINK_DEFAULT_INTERVAL_S 900     /* the display may set 60 s ... 6 h */
 
 /* ws_link_hdr_t.type */
 enum {

@@ -9,7 +9,7 @@ set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../components/ws-link")
 # as fw_build. Bump it by hand for every image that goes to the outdoor unit (OTA
 # relies on it changing). Without this, ESP-IDF would use the repo's git
 # version, which belongs to esp32flight.
-set(PROJECT_VER "3")
+set(PROJECT_VER "4")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # build only the components main actually requires

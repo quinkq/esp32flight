@@ -9,6 +9,7 @@
 void indoor_start(void);
 
 typedef struct {
+    bool     on;               /* switched on in the weather station settings */
     bool     answering;        /* false after 3 failed samples in a row */
     bool     have;             /* a sample since the display started */
     uint32_t age_s;            /* since that sample */

@@ -4,7 +4,10 @@
  * connection.
  *
  *  - The outdoor unit is the only peer, encrypted with the shared PMK and
- *    LMK.
+ *    LMK. The pairing and the interval come from the weather station
+ *    settings (components/ws-settings; menuconfig until something is saved).
+ *    A new interval goes out with the next reply; a new pairing restarts the
+ *    display.
  *  - The radio stays on the access point's channel; the outdoor unit finds
  *    it by trying channels until a frame is acknowledged.
  *  - Wi-Fi power save is off: with it on, the radio sleeps between the
@@ -27,22 +30,27 @@ static const char *TAG = "outdoor_link";
 
 #if CONFIG_OUTDOOR_LINK_ENABLED
 
-#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "outdoor_health.h"
 #include "readings_store.h"
 #include "ws_link.h"
+#include "ws_settings.h"
 
 #define TASK_PRIORITY    5            /* above the app's tasks (3-4): the outdoor unit waits 100 ms */
-#define TASK_STACK       6144         /* internal RAM; the daily summary logs how much is unused */
+#define TASK_STACK       6144         /* in PSRAM, like the queue: the 7B's internal RAM is too
+                                         scarce (upstream's peaks ran it down to 2.7 KB free).
+                                         Allowed here: this build keeps the caches on during
+                                         flash writes. The daily summary logs how much is unused. */
 #define HOUSEKEEPING_MS  30000
 #define BURST_MS         1000         /* quiet this long after a frame: the burst is over */
 #define FUTURE_S         3600         /* a reading dated later than this past the display's time isn't stored */
@@ -55,29 +63,6 @@ typedef struct {
 
 static uint8_t s_peer[6];
 static QueueHandle_t s_rx;
-
-/* hex digits into n bytes; ':' and '-' separators are skipped */
-static bool parse_hex(const char *s, uint8_t *out, size_t n)
-{
-    size_t got = 0;
-    int hi = -1;
-    for (; *s; s++) {
-        if (*s == ':' || *s == '-') {
-            continue;
-        }
-        if (!isxdigit((unsigned char)*s) || got == n) {
-            return false;
-        }
-        const int v = isdigit((unsigned char)*s) ? *s - '0' : tolower((unsigned char)*s) - 'a' + 10;
-        if (hi < 0) {
-            hi = v;
-        } else {
-            out[got++] = (uint8_t)(hi << 4 | v);
-            hi = -1;
-        }
-    }
-    return got == n && hi < 0;
-}
 
 static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
@@ -98,7 +83,7 @@ static void on_sent(const esp_now_send_info_t *info, esp_now_send_status_t statu
     outdoor_health_reply_sent(status == ESP_NOW_SEND_SUCCESS);
 }
 
-static void reply(uint16_t seq)
+static void reply(uint16_t seq, uint16_t interval_s)
 {
     const time_t now = time(NULL);
     const ws_link_reply_t r = {
@@ -109,7 +94,7 @@ static void reply(uint16_t seq)
             .seq = seq,
         },
         .unix_now = now >= CLOCK_VALID_FROM ? (uint32_t)now : 0,
-        .interval_s = CONFIG_OUTDOOR_LINK_INTERVAL_S,
+        .interval_s = interval_s,
         .cmd = WS_CMD_NONE,
     };
     const esp_err_t err = esp_now_send(s_peer, (const uint8_t *)&r, WS_LINK_REPLY_SIZE);
@@ -198,8 +183,10 @@ static void handle(const rx_item_t *item)
     const time_t now = time(NULL);
     const bool have_time = now >= CLOCK_VALID_FROM;
     const bool accept = have_time || (f.flags & WS_OUTDOOR_CLOCK_SYNCED);
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
     if (accept) {
-        reply(f.hdr.seq);
+        reply(f.hdr.seq, cfg.interval_s);
     }
 
     char offset[48] = "unknown (no time yet)";
@@ -223,6 +210,7 @@ static void handle(const rx_item_t *item)
     log_record(&newest);
 
     outdoor_marks_t marks;
+    outdoor_health_set_interval(cfg.interval_s);
     outdoor_health_frame(&f, item->data + sizeof(f), item->rssi, accept, &marks);
     if (accept) {
         store(&f, item->data + sizeof(f), item->rssi, &marks, have_time ? now : 0);
@@ -247,13 +235,17 @@ static void rx_task(void *arg)
 
 void outdoor_link_start(void)
 {
-    uint8_t pmk[16], lmk[16];
-    if (!parse_hex(CONFIG_OUTDOOR_LINK_PEER_MAC, s_peer, sizeof(s_peer)) ||
-        !parse_hex(CONFIG_OUTDOOR_LINK_PMK, pmk, sizeof(pmk)) ||
-        !parse_hex(CONFIG_OUTDOOR_LINK_LMK, lmk, sizeof(lmk))) {
-        ESP_LOGE(TAG, "pairing incomplete or malformed in menuconfig; link off");
+    ws_settings_t cfg;
+    ws_settings_get(&cfg);
+    if (!cfg.link_on) {
+        ESP_LOGI(TAG, "off in the weather station settings");
         return;
     }
+    if (!ws_settings_paired(&cfg)) {
+        ESP_LOGE(TAG, "not paired: the outdoor unit's MAC and keys go into the weather station settings; link off");
+        return;
+    }
+    memcpy(s_peer, cfg.mac, sizeof(s_peer));
 
     esp_now_peer_info_t peer = {
         .channel = 0,              /* whatever channel the access point uses */
@@ -261,35 +253,34 @@ void outdoor_link_start(void)
         .encrypt = true,
     };
     memcpy(peer.peer_addr, s_peer, sizeof(peer.peer_addr));
-    memcpy(peer.lmk, lmk, sizeof(peer.lmk));
+    memcpy(peer.lmk, cfg.lmk, sizeof(peer.lmk));
 
-    s_rx = xQueueCreate(4, sizeof(rx_item_t));
+    s_rx = xQueueCreateWithCaps(4, sizeof(rx_item_t), MALLOC_CAP_SPIRAM);
     esp_err_t err = ESP_ERR_NO_MEM;
     if (!s_rx ||
         (err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK ||
         (err = esp_now_init()) != ESP_OK ||
-        (err = esp_now_set_pmk(pmk)) != ESP_OK ||
+        (err = esp_now_set_pmk(cfg.pmk)) != ESP_OK ||
         (err = esp_now_add_peer(&peer)) != ESP_OK ||
         (err = esp_now_register_recv_cb(on_recv)) != ESP_OK ||
         (err = esp_now_register_send_cb(on_sent)) != ESP_OK) {
         ESP_LOGE(TAG, "setup failed: %s; link off", esp_err_to_name(err));
         return;
     }
-    if (!outdoor_health_init(CONFIG_OUTDOOR_LINK_INTERVAL_S) ||
-        xTaskCreate(rx_task, "outdoor_link", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+    if (!outdoor_health_init(cfg.interval_s) ||
+        xTaskCreateWithCaps(rx_task, "outdoor_link", TASK_STACK, NULL, TASK_PRIORITY, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "no memory for the task; link off");
         esp_now_deinit();
         return;
     }
-    ESP_LOGI(TAG, "listening for the outdoor unit " MACSTR ", interval %d s", MAC2STR(s_peer),
-             CONFIG_OUTDOOR_LINK_INTERVAL_S);
+    ESP_LOGI(TAG, "listening for the outdoor unit " MACSTR ", interval %u s", MAC2STR(s_peer), cfg.interval_s);
 }
 
 #else
 
 void outdoor_link_start(void)
 {
-    ESP_LOGI(TAG, "disabled (no pairing in this build)");
+    ESP_LOGI(TAG, "not in this build (menuconfig: Outdoor unit link)");
 }
 
 #endif
