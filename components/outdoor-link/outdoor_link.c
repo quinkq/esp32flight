@@ -19,8 +19,9 @@
  *    does its housekeeping every 30 s, and about a second after the last
  *    frame of a burst: a catch-up sends its next frame right after our
  *    reply, so nothing slow runs in between. That's also when the store
- *    writes to flash, so the outdoor unit's 100 ms wait for a reply never
- *    depends on it (a crash in between loses that burst).
+ *    writes to flash if it's due (hourly, or right away after a catch-up),
+ *    so the outdoor unit's 100 ms wait for a reply never depends on it (a
+ *    crash before the write loses what's waiting, at most an hour's).
  */
 #include "outdoor_link.h"
 
@@ -227,7 +228,7 @@ static void rx_task(void *arg)
             wait = pdMS_TO_TICKS(BURST_MS);
             continue;
         }
-        readings_store_flush();         /* first, so the tick sees how that went */
+        readings_store_flush_due();     /* first, so the tick sees how that went */
         outdoor_health_tick();
         wait = pdMS_TO_TICKS(HOUSEKEEPING_MS);
     }

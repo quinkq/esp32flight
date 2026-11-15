@@ -5,9 +5,13 @@
  * all of them in PSRAM, with a copy in the "readings" flash partition (the
  * unused 56 KB before the first app slot, partitions.csv).
  *
- * Readings go into RAM; readings_store_flush() writes what changed to flash.
- * outdoor-link calls it once a burst of frames is over, so its replies never
- * wait for the flash.
+ * Readings go into RAM. Flash gets what changed once the oldest change is an
+ * hour old, right away after a catch-up from the outdoor unit's backlog, and
+ * before every planned restart (esp_restart()): readings_store_flush_due(),
+ * which outdoor-link calls once a burst of frames is over (so its replies
+ * never wait for the flash) and the indoor sensor once per slot. An unplanned
+ * restart (a crash, a watchdog, the power) loses at most the last hour.
+ * readings_store_flush() writes at once (the "Save weather data" button).
  */
 
 #include <stdbool.h>
@@ -60,9 +64,15 @@ void readings_store_put_outdoor(const ws_link_record_t *r, uint32_t ts, int8_t r
  * 0.01 %RH), once the slot is complete. */
 void readings_store_put_indoor(uint32_t ts, int16_t t, uint16_t rh);
 
-/* What changed in RAM into flash: about 60 ms per sector written. Never call
- * it while someone waits for a quick answer. */
+/* What changed in RAM into flash, now: about 60 ms per sector written. Never
+ * call it while someone waits for a quick answer. */
 void readings_store_flush(void);
+
+/* The same, but only once it's due: the oldest unwritten change is an hour
+ * old, or more slots wait than an hour can fill (a catch-up: one slot per
+ * reading, and those readings exist nowhere else). Cheap otherwise, so call
+ * it often; never while someone waits for a quick answer. */
+void readings_store_flush_due(void);
 
 /* A copy of the newest slot with outdoor readings; false while there's none. */
 bool readings_store_latest(readings_slot_t *out);
@@ -96,6 +106,7 @@ typedef struct {
     uint32_t slots;            /* filled slots */
     uint32_t oldest, newest;   /* their ts; 0: none */
     uint32_t unwritten;        /* slots changed since flash last got them */
+    int64_t  written_us;       /* esp_timer time of the last write into flash; 0: none since the display started */
 } readings_store_info_t;
 
 void readings_store_info(readings_store_info_t *out);
