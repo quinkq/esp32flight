@@ -8,7 +8,8 @@
  *    It deep-sleeps instead, longer after each brownout in a row, so a weak
  *    supply can't keep the outdoor unit looping at ~70 mA until the cell is
  *    empty (that's how the previous cell died).
- *  - Hard cap: whatever hangs, the outdoor unit is asleep 3 s after boot.
+ *  - Hard cap: whatever hangs, the outdoor unit is asleep 3 s after boot
+ *    (longer only for an update or a new firmware's first wake).
  *  - Wakes are aligned to multiples of the interval (:00, :15, ...); the
  *    display can change the interval and sets the clock.
  *  - Counts for the display, since it last acknowledged a frame: brownouts,
@@ -57,6 +58,9 @@ typedef struct {
 
 static RTC_NOINIT_ATTR power_state_t s_state;
 
+static esp_timer_handle_t s_cap_timer;
+static uint32_t s_cap_ms = HARD_CAP_MS;
+
 static void count_up(uint8_t *n)
 {
     if (*n < UINT8_MAX) {
@@ -99,8 +103,8 @@ static uint64_t us_to_next_slot(void)
 
 static void hard_cap_cb(void *arg)
 {
-    ESP_LOGW(TAG, "hard cap: still awake after %d ms, forcing sleep", HARD_CAP_MS);
-    add_awake(HARD_CAP_MS);
+    ESP_LOGW(TAG, "hard cap: still awake after %" PRIu32 " ms, forcing sleep", s_cap_ms);
+    add_awake(s_cap_ms);
     esp_deep_sleep(us_to_next_slot());
 }
 
@@ -130,11 +134,22 @@ void power_begin(void)
     }
 
     const esp_timer_create_args_t args = { .callback = hard_cap_cb, .name = "hard_cap" };
-    esp_timer_handle_t timer;
-    if (esp_timer_create(&args, &timer) != ESP_OK ||
-        esp_timer_start_once(timer, (uint64_t)HARD_CAP_MS * 1000) != ESP_OK) {
+    if (esp_timer_create(&args, &s_cap_timer) != ESP_OK ||
+        esp_timer_start_once(s_cap_timer, (uint64_t)HARD_CAP_MS * 1000) != ESP_OK) {
         ESP_LOGE(TAG, "no hard-cap timer");
+        s_cap_timer = NULL;
     }
+}
+
+void power_extend_cap(uint32_t ms)
+{
+    if (s_cap_timer == NULL) {
+        return;
+    }
+    const uint32_t up_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    s_cap_ms = up_ms + ms;
+    esp_timer_stop(s_cap_timer);
+    esp_timer_start_once(s_cap_timer, (uint64_t)ms * 1000);
 }
 
 uint8_t power_brownouts(void)
@@ -150,6 +165,11 @@ uint8_t power_resets(void)
 uint32_t power_awake_total_ms(void)
 {
     return s_state.awake_total_ms;
+}
+
+void power_count_awake(void)
+{
+    add_awake((uint32_t)(esp_timer_get_time() / 1000));
 }
 
 void power_frame_acked(void)

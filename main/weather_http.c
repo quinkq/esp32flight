@@ -17,6 +17,10 @@
  *   GET/POST /api/weather-station/settings
  *                                      the weather station settings, JSON; the keys are never
  *                                      sent back. A new pairing or link switch restarts the display.
+ *   POST /api/outdoor/firmware         a firmware image for the outdoor unit (the raw .bin as the
+ *                                      body); offered to it from its next wake. DELETE cancels it.
+ *   GET /outdoor/firmware.bin          that image, for the outdoor unit: no password (it has none;
+ *                                      the image holds no secrets and is signed), 404 unless one waits
  *
  * Readings come calibrated (offsets, battery factor, pressure at sea level
  * when the altitude is known); raw=1 gives the stored values.
@@ -44,11 +48,13 @@
 #include "sdkconfig.h"
 #include "settings.h"
 #include "web_server.h"
+#include "ws_link.h"
 #include "ws_settings.h"
 
 static const char *TAG = "weather_http";
 
 #define PAGE_EVENTS 10
+#define FW_CHUNK    4096   /* upload and download pieces, in PSRAM */
 
 static volatile bool s_server_up;   /* weather_http_register() has run */
 
@@ -86,6 +92,15 @@ static const char OUTDOOR_HTML[] =
 "<div id='cards' class='cards'></div>"
 "<p id='frame'></p><p id='counts'></p>"
 "<h3>Recent events</h3><table id='ev'></table>"
+"<h3>Outdoor unit firmware</h3>"
+"<p id='fw_st'>&hellip;</p>"
+"<p><input type=file id='fw' accept='.bin'> <button type=button onclick='upload()'>Upload</button> "
+"<button type=button id='fw_x' onclick='cancelFw()' style='display:none'>Cancel the update</button> "
+"<span id='fw_msg'></span></p>"
+"<div class=dim>A signed <code>ws_alpha.bin</code> with a new build number (<code>ws_alpha/build/ws_alpha.bin</code>). "
+"The outdoor unit fetches it at its next wake with the battery at 3.7 V or more, over the Wi-Fi in its secrets, "
+"and gets 3 attempts, an hour apart. Kept in the display's spare firmware slot: it survives a display restart, "
+"a display update replaces it.</div>"
 "<h3 id='set'>Settings</h3>"
 "<form id='sf' onsubmit='return save(event)'>"
 "<fieldset><legend>Outdoor unit link</legend>"
@@ -121,8 +136,21 @@ static const char OUTDOOR_HTML[] =
 "function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
 "function card(k,v){return '<div class=card>'+k+'<b>'+v+'</b></div>';}"
 "function ok(name,good){return '<span class='+(good?'ok':'bad')+'>'+name+' '+(good?'&#10003;':'&#10007;')+'</span>';}"
+"function fwst(u){if(!u)return 'No update waiting.';"
+"if(u.state=='waiting')return 'Build '+u.build+' waiting for '+dur(u.since_s)+(u.from_build?' (the outdoor unit runs '+u.from_build+')':'')"
+"+', '+Math.round(u.size/1024)+' KB &middot; offers heard '+u.offers_heard+' &middot; downloads '+u.downloads_complete+' complete of '+u.downloads;"
+"if(u.state=='started')return 'Build '+u.build+' started on the outdoor unit '+dur(u.since_s)+' ago; done once it wakes on it again.';"
+"if(u.state=='done')return '<span class=ok>Build '+u.build+' installed</span> ('+dur(u.since_s)+' ago).';"
+"if(u.state=='failed')return '<span class=bad>Build '+u.build+' failed:</span> '+esc(u.why);"
+"return 'Build '+u.build+' cancelled.';}"
+"async function upload(){const f=$('fw').files[0];if(!f){$('fw_msg').textContent='choose the .bin first';return;}"
+"$('fw_msg').textContent='uploading...';let r;"
+"try{r=await fetch('/api/outdoor/firmware',{method:'POST',body:f});}catch(e){$('fw_msg').textContent='display not reachable';return;}"
+"$('fw_msg').innerHTML=r.ok?'<span class=ok>uploaded</span>':'<span class=bad>'+esc(await r.text())+'</span>';tick();}"
+"async function cancelFw(){try{await fetch('/api/outdoor/firmware',{method:'DELETE'});}catch(e){}$('fw_msg').textContent='';tick();}"
 "async function tick(){"
 "let d;try{d=await (await fetch('/api/outdoor')).json();}catch(e){$('st').textContent='display not reachable';return;}"
+"$('fw_st').innerHTML=fwst(d.update);$('fw_x').style.display=d.update&&d.update.state=='waiting'?'':'none';"
 "if(!d.running){$('st').innerHTML='<span class=bad>&#9679; link off</span> (switched off, not paired, or not in this build: see the settings below)';return;}"
 "let s='<span class='+d.status.replace(' ','')+'>&#9679; '+d.status+'</span>';"
 "if(d.last_heard_s_ago!==undefined){s+=' &middot; last heard '+dur(d.last_heard_s_ago)+' ago';"
@@ -201,6 +229,24 @@ static const char *status_name(outdoor_status_t s)
     }
 }
 
+static const char *ota_state_name(outdoor_ota_state_t s)
+{
+    switch (s) {
+    case OUTDOOR_OTA_WAITING:
+        return "waiting";
+    case OUTDOOR_OTA_STARTED:
+        return "started";
+    case OUTDOOR_OTA_DONE:
+        return "done";
+    case OUTDOOR_OTA_FAILED:
+        return "failed";
+    case OUTDOOR_OTA_CANCELLED:
+        return "cancelled";
+    default:
+        return "none";
+    }
+}
+
 static esp_err_t outdoor_api_get(httpd_req_t *req)
 {
     if (!auth_ok(req)) {
@@ -261,6 +307,23 @@ static esp_err_t outdoor_api_get(httpd_req_t *req)
         cJSON_AddNumberToObject(root, "assets_free_kb", h.assets_free_kb);
     } else {
         cJSON_AddNullToObject(root, "assets_free_kb");
+    }
+
+    outdoor_ota_info_t u;
+    outdoor_ota_info(&u);
+    if (u.state != OUTDOOR_OTA_NONE) {
+        cJSON *o = cJSON_AddObjectToObject(root, "update");
+        cJSON_AddStringToObject(o, "state", ota_state_name(u.state));
+        cJSON_AddNumberToObject(o, "since_s", (double)((now_us - u.changed_us) / 1000000));
+        cJSON_AddNumberToObject(o, "build", u.build);
+        cJSON_AddNumberToObject(o, "from_build", u.from_build);
+        cJSON_AddNumberToObject(o, "size", u.size);
+        cJSON_AddNumberToObject(o, "offers_heard", u.offers_heard);
+        cJSON_AddNumberToObject(o, "downloads", u.downloads);
+        cJSON_AddNumberToObject(o, "downloads_complete", u.downloads_complete);
+        if (u.state == OUTDOOR_OTA_FAILED) {
+            cJSON_AddStringToObject(o, "why", u.why);
+        }
     }
 
     /* from RAM, so they show before the display has time to write them */
@@ -788,6 +851,90 @@ static esp_err_t ws_settings_api_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/outdoor/firmware: the raw .bin as the body, checked and kept by
+ * outdoor-link (outdoor_ota.c) */
+static esp_err_t firmware_post(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    const char *why = outdoor_ota_begin(req->content_len);
+    if (why != NULL) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, why);
+    }
+    char *buf = heap_caps_malloc(FW_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        outdoor_ota_abort();
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory on the display");
+    }
+    size_t left = req->content_len;
+    int timeouts = 0;
+    while (left > 0) {
+        const int n = httpd_req_recv(req, buf, left < FW_CHUNK ? left : FW_CHUNK);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 5) {
+            continue;
+        }
+        if (n <= 0) {
+            free(buf);
+            outdoor_ota_abort();
+            ESP_LOGW(TAG, "outdoor unit image: the upload broke off");
+            return ESP_FAIL;
+        }
+        if ((why = outdoor_ota_write(buf, n)) != NULL) {
+            free(buf);
+            outdoor_ota_abort();
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, why);
+        }
+        left -= n;
+    }
+    free(buf);
+    if ((why = outdoor_ota_end()) != NULL) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, why);
+    }
+    outdoor_ota_info_t u;
+    outdoor_ota_info(&u);
+    char json[64];
+    snprintf(json, sizeof(json), "{\"build\":%u,\"size\":%lu}", u.build, (unsigned long)u.size);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+/* DELETE /api/outdoor/firmware: stop offering the waiting image */
+static esp_err_t firmware_delete(httpd_req_t *req)
+{
+    if (!auth_ok(req)) {
+        return require_auth(req);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, outdoor_ota_cancel() ? "{\"cancelled\":true}" : "{\"cancelled\":false}");
+}
+
+/* GET /outdoor/firmware.bin: the outdoor unit's download. No password: it
+ * doesn't know the panel's. The image holds no secrets, the outdoor unit
+ * checks its signature and the hash from the encrypted reply. */
+static esp_err_t firmware_get(httpd_req_t *req)
+{
+    uint32_t size = 0;
+    if (!outdoor_ota_download_begin(&size)) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no update waiting");
+    }
+    char *buf = heap_caps_malloc(FW_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint32_t sent = 0;
+    bool ok = buf != NULL;
+    httpd_resp_set_type(req, "application/octet-stream");
+    while (ok && sent < size) {
+        const size_t n = outdoor_ota_download_read(sent, buf, FW_CHUNK);
+        ok = n > 0 && httpd_resp_send_chunk(req, buf, n) == ESP_OK;
+        sent += ok ? n : 0;
+    }
+    if (ok) {
+        ok = httpd_resp_send_chunk(req, NULL, 0) == ESP_OK;
+    }
+    free(buf);
+    outdoor_ota_download_end(ok && sent == size, sent);
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
 void weather_http_register(httpd_handle_t server)
 {
     const httpd_uri_t uris[] = {
@@ -798,6 +945,9 @@ void weather_http_register(httpd_handle_t server)
         { .uri = "/api/readings/history", .method = HTTP_GET, .handler = history_get },
         { .uri = "/api/weather-station/settings", .method = HTTP_GET, .handler = ws_settings_api_get },
         { .uri = "/api/weather-station/settings", .method = HTTP_POST, .handler = ws_settings_api_post },
+        { .uri = "/api/outdoor/firmware", .method = HTTP_POST, .handler = firmware_post },
+        { .uri = "/api/outdoor/firmware", .method = HTTP_DELETE, .handler = firmware_delete },
+        { .uri = WS_LINK_OTA_PATH, .method = HTTP_GET, .handler = firmware_get },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         if (httpd_register_uri_handler(server, &uris[i]) != ESP_OK) {

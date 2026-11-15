@@ -18,5 +18,6 @@ CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
 CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
 CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
 # The private key lives outside the repo, next to the clone (the path is
-# relative to the project directory). Without it the build stops.
-CONFIG_SECURE_BOOT_SIGNING_KEY="../secrets/display-signing-key.pem"
+# relative to the project directory). Without it the build stops. The same
+# key signs the outdoor unit's firmware (ws_alpha/sdkconfig.defaults).
+CONFIG_SECURE_BOOT_SIGNING_KEY="../secrets/firmware-signing-key.pem"

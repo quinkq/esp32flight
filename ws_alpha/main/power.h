@@ -7,6 +7,10 @@
  * reset it deep-sleeps and never returns), hard-cap timer. */
 void power_begin(void);
 
+/* A longer wake than the 3 s hard cap allows (an update, a new firmware's
+ * first wake): asleep ms from now at the latest. */
+void power_extend_cap(uint32_t ms);
+
 /* Reported to the display, each since it last acknowledged a frame: brownout
  * resets and other resets (not power-on or deep-sleep wakes), both saturating
  * at 255, and the summed length of the wakes (app start to sleep), the
@@ -14,6 +18,10 @@ void power_begin(void);
 uint8_t power_brownouts(void);
 uint8_t power_resets(void);
 uint32_t power_awake_total_ms(void);
+
+/* This wake's time so far into the awake total, before a restart that skips
+ * power_sleep() (an update, a new firmware going back). */
+void power_count_awake(void);
 
 /* The display acknowledged a frame carrying the counts above: they restart. */
 void power_frame_acked(void);
