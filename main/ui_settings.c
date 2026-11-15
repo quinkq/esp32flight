@@ -579,8 +579,9 @@ void ui_settings_open(void)
     lv_label_set_text_fmt(title, LV_SYMBOL_SETTINGS " %s", L()->settings_title);
     lv_obj_set_pos(title, UISX(14), UISY(12));
 
+    lv_obj_t *up = NULL;   /* weather-station fork: kept for ui_weather_settings_header() */
     if (ui_update_available()) {
-        lv_obj_t *up = lv_label_create(s_overlay);
+        up = lv_label_create(s_overlay);
         lv_obj_set_style_text_font(up, UIFONT(&font_pl_14, &font_pl_8), 0);
         lv_obj_set_style_text_color(up, lv_color_hex(0xffd166), 0);
         char upt[96];
@@ -594,6 +595,7 @@ void ui_settings_open(void)
      * helper would UISX() the whole mixed expression) */
     lv_obj_t *hbtn = add_button(s_overlay, 0, 6, 150, 38, buf, save_cb, COL_ACCENT);
     lv_obj_set_x(hbtn, LV_HOR_RES - UISX(230));
+    ui_weather_settings_header(s_overlay, title, hbtn, up);   /* weather-station fork */
     hbtn = add_button(s_overlay, 0, 6, 54, 38, LV_SYMBOL_CLOSE, close_cb, COL_PANEL);
     lv_obj_set_x(hbtn, LV_HOR_RES - UISX(66));
 

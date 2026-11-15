@@ -12,9 +12,16 @@
  *  - A part is rewritten whole: into a blank sector, its header last, and
  *    only then is the old copy erased. A power loss leaves the old copy, or
  *    both (the higher sequence number wins at boot), never neither.
- *  - Wear: one sector erase per flush (a burst of frames), ~96 a day at the
- *    15-minute interval. Taking the next blank sector in turn spreads them,
- *    ~2,500 a year per sector against the flash's 100,000.
+ *  - When: flash gets the changes once the oldest is an hour old, so one
+ *    write takes both the outdoor and the indoor values; right away when more
+ *    slots wait than an hour fills (a catch-up from the outdoor unit's
+ *    backlog: it deletes them once answered); before a planned restart (a
+ *    shutdown handler: esp_restart() runs it, a panic, a watchdog, a brownout
+ *    or a power cut don't); and on request. A crash loses at most an hour.
+ *  - Wear: one sector erase per part written, ~24 a day. Taking the next
+ *    blank sector in turn spreads them, ~600 a year per sector against the
+ *    flash's 100,000 (decided 2026-11-15 for a long life; until then a write
+ *    after every burst plus one per indoor slot, ~5,000 a year).
  *  - The caches stay on during flash writes in this build (code and rodata
  *    run from PSRAM), so other tasks and the 7B's panel don't wait.
  *  - A record counts only when its ts belongs to its position and its
@@ -46,6 +53,7 @@
 #include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_rom_crc.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -60,6 +68,10 @@ static const char *TAG = "readings";
 #define SECTOR_MAGIC 0x31525357u        /* "WSR1" in flash */
 #define FORMAT       1
 #define BATCH        16                 /* slots copied per hold of s_mux for a reader */
+#define WRITE_AFTER_US  (3600LL * 1000000)  /* the oldest unwritten change waits at most this long */
+#define CATCH_UP_SLOTS  8               /* more waiting: a catch-up, written at once (an hour
+                                           fills 4 slots, 5 across a boundary) */
+#define RESTART_WAIT_MS 2000            /* for a write already running, before a restart */
 
 typedef struct {
     uint32_t magic;
@@ -91,6 +103,9 @@ static SemaphoreHandle_t s_mux;         /* guards RAM, the state and s_failing *
 static SemaphoreHandle_t s_flash;       /* around flash access and the sector map */
 static readings_slot_t *s_ram;          /* READINGS_SLOTS, in PSRAM; NULL: not started */
 static uint32_t s_unwritten[(READINGS_SLOTS + 31) / 32];  /* a bit per record flash doesn't have yet */
+static uint32_t s_n_unwritten;          /* the bits set */
+static int64_t s_dirty_us;              /* esp_timer time of the oldest unwritten change; 0: none */
+static int64_t s_written_us;            /* of the last write into flash; 0: none since boot */
 static uint32_t *s_changed;             /* each slot's last change number, in PSRAM; 1: loaded at boot */
 static uint32_t s_change = 1;           /* the latest change number */
 static uint32_t s_boot;                 /* random, for the cursor tokens */
@@ -115,19 +130,32 @@ static uint8_t check_of(const readings_slot_t *s)
     return esp_rom_crc8_le(0, (const uint8_t *)s, offsetof(readings_slot_t, check));
 }
 
+static bool marked(uint32_t pos)
+{
+    return s_unwritten[pos / 32] & 1u << (pos % 32);
+}
+
+/* under s_mux */
 static void mark(uint32_t pos)
 {
+    if (marked(pos)) {
+        return;
+    }
     s_unwritten[pos / 32] |= 1u << (pos % 32);
+    if (s_n_unwritten++ == 0) {
+        s_dirty_us = esp_timer_get_time();
+    }
 }
 
 static void unmark(uint32_t pos)
 {
+    if (!marked(pos)) {
+        return;
+    }
     s_unwritten[pos / 32] &= ~(1u << (pos % 32));
-}
-
-static bool marked(uint32_t pos)
-{
-    return s_unwritten[pos / 32] & 1u << (pos % 32);
+    if (--s_n_unwritten == 0) {
+        s_dirty_us = 0;
+    }
 }
 
 static void ram_only(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -329,13 +357,20 @@ static bool write_part(int k)
     return true;
 }
 
-void readings_store_flush(void)
+/* What changed into flash, once s_flash is free within `wait`. */
+static void flush(TickType_t wait)
 {
     if (s_ram == NULL) {
         return;
     }
-    xSemaphoreTake(s_flash, portMAX_DELAY);
+    if (xSemaphoreTake(s_flash, wait) != pdTRUE) {
+        ESP_LOGW(TAG, "flash busy: the readings stay in RAM");
+        return;
+    }
     const int64_t t0 = esp_timer_get_time();
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    const int64_t dirty_us = s_dirty_us;  /* kept when a write fails: tried again soon, not in an hour */
+    xSemaphoreGive(s_mux);
     bool ok = true;
     unsigned parts = 0;
     for (int k = 0; ok && k < PARTS; k++) {
@@ -375,6 +410,12 @@ void readings_store_flush(void)
     xSemaphoreTake(s_mux, portMAX_DELAY);
     const bool was_failing = s_failing;
     s_failing = !ok;
+    if (!ok && dirty_us != 0 && s_n_unwritten != 0 && dirty_us < s_dirty_us) {
+        s_dirty_us = dirty_us;
+    }
+    if (ok && parts != 0) {
+        s_written_us = esp_timer_get_time();
+    }
     xSemaphoreGive(s_mux);
     if (!ok && !was_failing) {
         ESP_LOGW(TAG, "can't write the \"%s\" partition; the readings wait in RAM", READINGS_PARTITION);
@@ -382,6 +423,33 @@ void readings_store_flush(void)
         ESP_LOGI(TAG, "%u part%s into flash (%lld ms)", parts, parts == 1 ? "" : "s",
                  (long long)((esp_timer_get_time() - t0) / 1000));
     }
+}
+
+void readings_store_flush(void)
+{
+    flush(portMAX_DELAY);
+}
+
+void readings_store_flush_due(void)
+{
+    if (s_ram == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    const bool due = s_state == READINGS_FLASH && s_n_unwritten != 0 &&
+                     (s_n_unwritten > CATCH_UP_SLOTS || esp_timer_get_time() - s_dirty_us >= WRITE_AFTER_US);
+    xSemaphoreGive(s_mux);
+    if (due) {
+        flush(portMAX_DELAY);
+    }
+}
+
+/* Run by esp_restart(): the settings saved, a firmware update, the pairing
+ * changed. In the restarting task, which never holds our locks; a write
+ * already running gets RESTART_WAIT_MS to finish. */
+static void before_restart(void)
+{
+    flush(pdMS_TO_TICKS(RESTART_WAIT_MS));
 }
 
 bool readings_store_latest(readings_slot_t *out)
@@ -474,6 +542,7 @@ void readings_store_info(readings_store_info_t *out)
     out->state = s_state;
     strlcpy(out->why, s_why, sizeof(out->why));
     out->write_failing = s_failing;
+    out->written_us = s_written_us;
     out->newest = s_newest * READINGS_SLOT_S;
     for (uint32_t pos = 0; pos < READINGS_SLOTS; pos++) {
         const uint32_t ts = s_ram[pos].ts;
@@ -612,4 +681,7 @@ void readings_store_init(void)
     ESP_LOGI(TAG, "%u slots in the \"%s\" partition (%u of %d parts written), read in %lld ms; newest %lu",
              slots, READINGS_PARTITION, parts, PARTS, (long long)((esp_timer_get_time() - t0) / 1000),
              (unsigned long)(s_newest * READINGS_SLOT_S));
+    if (esp_register_shutdown_handler(before_restart) != ESP_OK) {
+        ESP_LOGW(TAG, "no shutdown handler: a restart loses up to an hour of readings");
+    }
 }

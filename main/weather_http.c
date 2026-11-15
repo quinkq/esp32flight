@@ -372,6 +372,7 @@ static esp_err_t readings_api_get(httpd_req_t *req)
     cJSON_AddBoolToObject(st, "write_failing", si.write_failing);
     cJSON_AddNumberToObject(st, "slots", si.slots);
     cJSON_AddNumberToObject(st, "unwritten", si.unwritten);
+    add_value(st, "written_s_ago", si.written_us != 0, (double)((esp_timer_get_time() - si.written_us) / 1000000));
     add_value(st, "oldest", si.oldest != 0, si.oldest);
     add_value(st, "newest", si.newest != 0, si.newest);
 

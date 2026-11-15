@@ -6,8 +6,11 @@
  * calibration). Each change is saved by itself 2 s after the last tap and
  * applies live: the overlay's Save button (upstream's settings, then a
  * restart) isn't needed for them. Pairing, exact values and the altitude
- * override stay on the web page. Later the weather view, the header text and
- * the screensaver block.
+ * override stay on the web page. At the bottom, how the readings stand in
+ * flash. The overlay's top bar gets "Save weather data" next to upstream's
+ * Save, renamed "Save settings": the readings into flash now (the store does
+ * it hourly and before every restart), for switching the display off. Later
+ * the weather view, the header text and the screensaver block.
  *
  * Labels follow the display's language (English, Polish). Event texts stay
  * English: they're written when the event happens, also into the log file;
@@ -23,7 +26,11 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "fonts.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
+#include "freertos/task.h"
 #include "outdoor_link.h"
+#include "readings_store.h"
 #include "settings.h"
 #include "theme.h"
 #include "ui_scale.h"
@@ -41,6 +48,14 @@
 #define EVENTS_TEXT   (TAB_EVENTS * 300)
 #define SAVE_DELAY_MS 2000                 /* after the last tap */
 #define MSG_MS        3000                 /* "Saved" stays this long */
+#define WRITE_POLL_MS 200                  /* "Save weather data": how often the button looks whether it's done */
+#define WRITE_DONE_MS 4000                 /* "Safe to switch off" stays this long */
+#define WRITE_STACK   4096                 /* its task, in PSRAM (flash writes keep the caches on in this build) */
+#define WRITE_PRIORITY 2
+#define HDR_GAP       10                   /* between the top bar's items */
+#define HDR_PAD       16                   /* a button's text to its edges */
+#define ICON_CLOUD_SUN "\xEF\x9B\x84"      /* f6c4, in the fonts for upstream's weather.c */
+#define CLOCK_VALID_FROM 1767225600        /* 2026-01-01, as in outdoor-link: earlier means no time yet */
 
 /* the steppers, in stored units, shown as value / div */
 enum { ST_OUT_T, ST_OUT_RH, ST_IN_T, ST_IN_RH, ST_BAT, N_STEP };
@@ -85,6 +100,10 @@ typedef struct {
     /* the settings part */
     const char *settings, *every, *hours, *indoor, *offsets, *step[N_STEP], *cal_hint;
     const char *alt_home, *alt_set, *alt_none, *web, *saved, *not_saved;   /* %d: metres; %s: why */
+    /* the readings: "Save weather data" and how things stand */
+    const char *data, *write, *writing, *all_written, *last_written, *never_written;  /* %s: a time */
+    const char *write_failing, *not_kept, *write_hint;                     /* %s: why */
+    const char *save_settings, *safe_off, *write_failed;                   /* the top bar */
 } strings_t;
 
 /* frame and counts take the same arguments, in the same order, in both: the
@@ -141,6 +160,20 @@ static const strings_t k_en = {
     .web = "Pairing, exact values and the altitude: the weather station page on the web panel (/outdoor).",
     .saved = "Saved",
     .not_saved = "Not saved: %s",
+    .data = "Readings",
+    .write = "Save weather data",
+    .writing = "Saving...",
+    .all_written = "All saved, safe to switch off",
+    .last_written = "Last saved %s",
+    .never_written = "Not saved since the display started",
+    .write_failing = "Saving fails; the readings wait in memory and it tries again",
+    .not_kept = "Readings aren't kept: %s",
+    .write_hint = "Readings are saved by themselves every hour and before every restart "
+                  "(\"Save settings\" restarts the display). Before switching the display off, "
+                  "tap \"Save weather data\" at the top.",
+    .save_settings = "Save settings",
+    .safe_off = "Safe to switch off",
+    .write_failed = "Saving failed",
 };
 
 static const strings_t k_pl = {
@@ -198,6 +231,20 @@ static const strings_t k_pl = {
     .web = "Parowanie, dokładne wartości i wysokość: strona stacji pogodowej w panelu WWW (/outdoor).",
     .saved = "Zapisano",
     .not_saved = "Nie zapisano: %s",
+    .data = "Odczyty",
+    .write = "Zapisz dane pogodowe",
+    .writing = "Zapisywanie...",
+    .all_written = "Wszystko zapisane, można wyłączyć",
+    .last_written = "Ostatni zapis %s",
+    .never_written = "Brak zapisu od uruchomienia",
+    .write_failing = "Zapis się nie udaje; odczyty czekają w pamięci, kolejna próba wkrótce",
+    .not_kept = "Odczyty nie są przechowywane: %s",
+    .write_hint = "Odczyty zapisują się same co godzinę i przed każdym restartem "
+                  "(\"Zapisz ustawienia\" restartuje wyświetlacz). Przed wyłączeniem wyświetlacza "
+                  "dotknij \"Zapisz dane pogodowe\" u góry.",
+    .save_settings = "Zapisz ustawienia",
+    .safe_off = "Można wyłączyć",
+    .write_failed = "Zapis nie udał się",
 };
 
 static const strings_t *S(void)
@@ -219,7 +266,20 @@ static struct {
     uint8_t n_intervals;
     uint16_t interval_s;
     bool indoor_on, dirty;
+    /* the readings' part */
+    lv_obj_t *store;
 } s_tab;
+
+/* "Save weather data" running in its task; outlives the overlay */
+static volatile bool s_writing;
+
+/* the top bar's "Save weather data"; gone with the overlay */
+enum { HDR_IDLE, HDR_WRITING, HDR_DONE };
+static struct {
+    lv_obj_t *label;
+    lv_timer_t *timer;                     /* polls the write, then ends "Safe to switch off" */
+    int phase;
+} s_hdr;
 
 const char *ui_weather_tab_name(void)
 {
@@ -265,6 +325,45 @@ static void dur(char *buf, size_t n, int64_t s)
     }
 }
 
+/* the readings' line: everything in flash, or since when not */
+static void show_store(void)
+{
+    if (s_tab.store == NULL) {
+        return;
+    }
+    const strings_t *str = S();
+    readings_store_info_t si;
+    readings_store_info(&si);
+    char buf[160];
+    lv_color_t col = COL_DIM;
+    if (s_writing) {
+        snprintf(buf, sizeof(buf), "%s", str->writing);
+    } else if (si.state != READINGS_FLASH) {
+        snprintf(buf, sizeof(buf), str->not_kept, si.why[0] != '\0' ? si.why : "-");
+        col = COL_BAD;
+    } else if (si.write_failing) {
+        snprintf(buf, sizeof(buf), "%s", str->write_failing);
+        col = COL_BAD;
+    } else if (si.unwritten == 0) {
+        snprintf(buf, sizeof(buf), "%s", str->all_written);
+        col = COL_ACCENT;
+    } else if (si.written_us == 0) {
+        snprintf(buf, sizeof(buf), "%s", str->never_written);
+    } else {
+        char t[8] = "--:--";
+        const time_t now = time(NULL);
+        if (now >= CLOCK_VALID_FROM) {
+            const time_t when = now - (time_t)((esp_timer_get_time() - si.written_us) / 1000000);
+            struct tm tm;
+            localtime_r(&when, &tm);
+            snprintf(t, sizeof(t), "%02d:%02d", tm.tm_hour, tm.tm_min);
+        }
+        snprintf(buf, sizeof(buf), str->last_written, t);
+    }
+    lv_label_set_text(s_tab.store, buf);
+    lv_obj_set_style_text_color(s_tab.store, col, 0);
+}
+
 static void refresh(lv_timer_t *timer)
 {
     const strings_t *str = S();
@@ -272,6 +371,7 @@ static void refresh(lv_timer_t *timer)
     outdoor_link_health(&h);
     char buf[400], d[24];
 
+    show_store();
     if (!h.running) {
         lv_label_set_text(s_tab.status, str->link_off);
         lv_obj_set_style_text_color(s_tab.status, COL_DIM, 0);
@@ -693,6 +793,170 @@ static void settings_part(lv_obj_t *box)
     lv_timer_pause(s_tab.msg_timer);
 }
 
+/* how the readings stand; the button is in the top bar */
+static void data_part(lv_obj_t *box)
+{
+    const strings_t *str = S();
+    lv_obj_t *head = text(box, UIFONT(&font_pl_16, &font_pl_10), COL_ACCENT);
+    lv_obj_set_style_pad_top(head, UISY(14), 0);
+    lv_label_set_text(head, str->data);
+    s_tab.store = text(box, UIFONT(&font_pl_16, &font_pl_10), COL_DIM);
+    lv_label_set_text(text(box, UIFONT(&font_pl_14, &font_pl_8), COL_DIM), str->write_hint);
+}
+
+/* ---- the top bar's "Save weather data" ---- */
+
+/* the flash write takes ~60 ms a sector (more while the link task's own
+ * write finishes), too long for the LVGL task */
+static void write_task(void *arg)
+{
+    readings_store_flush();
+    s_writing = false;
+    vTaskDeleteWithCaps(NULL);             /* frees the PSRAM stack too */
+}
+
+static void hdr_text(char *buf, size_t n, int phase, bool ok)
+{
+    const strings_t *str = S();
+    if (phase == HDR_WRITING) {
+        snprintf(buf, n, ICON_CLOUD_SUN "  %s", str->writing);
+    } else if (phase == HDR_DONE) {
+        snprintf(buf, n, "%s  %s", ok ? LV_SYMBOL_OK : LV_SYMBOL_WARNING, ok ? str->safe_off : str->write_failed);
+    } else {
+        snprintf(buf, n, ICON_CLOUD_SUN "  %s", str->write);
+    }
+}
+
+static void hdr_show(int phase, bool ok)
+{
+    char buf[64];
+    hdr_text(buf, sizeof(buf), phase, ok);
+    lv_label_set_text(s_hdr.label, buf);
+    s_hdr.phase = phase;
+}
+
+static void hdr_timer_cb(lv_timer_t *t)
+{
+    if (s_hdr.phase == HDR_WRITING) {
+        if (s_writing) {
+            return;
+        }
+        readings_store_info_t si;
+        readings_store_info(&si);
+        hdr_show(HDR_DONE, si.state == READINGS_FLASH && !si.write_failing);
+        show_store();                      /* the tab's line, if it's open */
+        lv_timer_set_period(t, WRITE_DONE_MS);
+        lv_timer_reset(t);
+        return;
+    }
+    hdr_show(HDR_IDLE, true);
+    lv_timer_pause(t);
+}
+
+static void hdr_click_cb(lv_event_t *e)
+{
+    if (s_hdr.phase == HDR_WRITING) {
+        return;                            /* a tap while it runs */
+    }
+    if (!s_writing) {                      /* else one from an earlier overlay still runs: wait for it */
+        s_writing = true;
+        if (xTaskCreateWithCaps(write_task, "ws_write", WRITE_STACK, NULL, WRITE_PRIORITY, NULL,
+                                MALLOC_CAP_SPIRAM) != pdPASS) {
+            s_writing = false;
+            hdr_show(HDR_DONE, false);
+            lv_timer_set_period(s_hdr.timer, WRITE_DONE_MS);
+            lv_timer_reset(s_hdr.timer);
+            lv_timer_resume(s_hdr.timer);
+            return;
+        }
+    }
+    hdr_show(HDR_WRITING, true);
+    show_store();
+    lv_timer_set_period(s_hdr.timer, WRITE_POLL_MS);
+    lv_timer_reset(s_hdr.timer);
+    lv_timer_resume(s_hdr.timer);
+}
+
+static void hdr_delete_cb(lv_event_t *e)
+{
+    if (s_hdr.timer != NULL) {
+        lv_timer_del(s_hdr.timer);         /* a running write finishes by itself */
+    }
+    memset(&s_hdr, 0, sizeof(s_hdr));
+}
+
+static lv_coord_t text_width(const char *s, const lv_font_t *font)
+{
+    lv_point_t p;
+    lv_txt_get_size(&p, s, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return p.x;
+}
+
+void ui_weather_settings_header(lv_obj_t *overlay, lv_obj_t *title, lv_obj_t *save_btn, lv_obj_t *notice)
+{
+    const strings_t *str = S();
+    const lv_font_t *font = UIFONT(&font_pl_16, &font_pl_10);
+    char buf[64];
+    lv_obj_update_layout(overlay);         /* the positions and sizes upstream set */
+
+    /* upstream's Save: "Save settings", as wide as that needs, its right edge kept */
+    const lv_coord_t right = lv_obj_get_x(save_btn) + lv_obj_get_width(save_btn);
+    lv_obj_t *save_label = lv_obj_get_child(save_btn, 0);
+    snprintf(buf, sizeof(buf), LV_SYMBOL_SAVE "  %s", str->save_settings);
+    lv_label_set_text(save_label, buf);
+    lv_coord_t w = text_width(buf, font) + 2 * UISX(HDR_PAD);
+    if (w < lv_obj_get_width(save_btn)) {
+        w = lv_obj_get_width(save_btn);
+    }
+    lv_obj_set_width(save_btn, w);
+    lv_obj_set_x(save_btn, right - w);
+    const lv_coord_t save_x = right - w;
+
+    /* ours to its left, wide enough for each of its texts, so it never jumps */
+    lv_coord_t ours = 0;
+    for (int phase = HDR_IDLE; phase <= HDR_DONE; phase++) {
+        for (int ok = 0; ok <= 1; ok++) {
+            hdr_text(buf, sizeof(buf), phase, ok);
+            const lv_coord_t tw = text_width(buf, font);
+            ours = tw > ours ? tw : ours;
+        }
+    }
+    ours += 2 * UISX(HDR_PAD);
+    const lv_coord_t ours_x = save_x - UISX(HDR_GAP) - ours;
+    lv_obj_t *b = lv_btn_create(overlay);
+    lv_obj_set_pos(b, ours_x, lv_obj_get_y(save_btn));
+    lv_obj_set_size(b, ours, lv_obj_get_height(save_btn));
+    lv_obj_set_style_bg_color(b, app_theme()->row_sel, 0);   /* a muted shade of the accent */
+    lv_obj_add_event_cb(b, hdr_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(b, hdr_delete_cb, LV_EVENT_DELETE, NULL);
+    memset(&s_hdr, 0, sizeof(s_hdr));
+    s_hdr.label = lv_label_create(b);
+    lv_obj_set_style_text_font(s_hdr.label, font, 0);
+    lv_obj_set_style_text_color(s_hdr.label, COL_TEXT, 0);
+    lv_obj_center(s_hdr.label);
+    hdr_show(HDR_IDLE, true);
+    s_hdr.timer = lv_timer_create(hdr_timer_cb, WRITE_POLL_MS, NULL);
+    lv_timer_pause(s_hdr.timer);
+
+    /* the update notice: centred in what's left between the title and ours,
+     * shortened with "..." when it doesn't fit, hidden when nothing does */
+    if (notice != NULL) {
+        const lv_coord_t left = lv_obj_get_x(title) + lv_obj_get_width(title) + UISX(2 * HDR_GAP);
+        const lv_coord_t room = ours_x - UISX(2 * HDR_GAP) - left;
+        lv_coord_t nw = lv_obj_get_width(notice);
+        if (room < UISX(60)) {
+            lv_obj_add_flag(notice, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            if (nw > room) {
+                lv_label_set_long_mode(notice, LV_LABEL_LONG_DOT);
+                lv_obj_set_width(notice, room);
+                nw = room;
+            }
+            lv_obj_align(notice, LV_ALIGN_TOP_LEFT, left + (room - nw) / 2, lv_obj_get_y(notice));
+        }
+    }
+}
+
 void ui_weather_settings_tab(lv_obj_t *page)
 {
     const strings_t *str = S();
@@ -727,6 +991,7 @@ void ui_weather_settings_tab(lv_obj_t *page)
     lv_label_set_text(title, str->events);
     s_tab.events = text(box, UIFONT(&font_pl_14, &font_pl_8), COL_TEXT);
     settings_part(box);
+    data_part(box);
 
     s_tab.ev = heap_caps_malloc(TAB_EVENTS * sizeof(outdoor_event_t) + EVENTS_TEXT,
                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

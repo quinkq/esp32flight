@@ -8,8 +8,8 @@
  *  - A sample every 60 s: high repeatability, heater never used, CRC checked.
  *  - The samples of a slot (the store's rule: the nearest slot start) are
  *    averaged here; the mean goes to the store once a sample belongs to the
- *    next slot, so flash sees one write per slot rather than one per minute.
- *    A display restart loses the half-filled slot. Until the display has
+ *    next slot, and into flash with the outdoor readings once the store's
+ *    write is due (hourly). A display restart loses the half-filled slot. Until the display has
  *    time, samples only update the latest value.
  *  - Lost after 3 failed samples in a row, back after 3 good ones: an
  *    "indoor" event in the weather station's event log.
@@ -92,8 +92,10 @@ static int32_t mean(int32_t sum, int32_t n)
     return sum >= 0 ? (sum + n / 2) / n : -((-sum + n / 2) / n);
 }
 
-/* A sample into its slot's mean; a slot's mean goes to the store (and
- * flash) once a sample belongs to the next one. */
+/* A sample into its slot's mean; a slot's mean goes to the store once a
+ * sample belongs to the next one. The flash write is the store's to time:
+ * this only covers a display without the outdoor-link task (not paired),
+ * whose housekeeping otherwise asks every 30 s. */
 static void average(uint32_t now, int16_t t, uint16_t rh)
 {
     const uint32_t slot = (now + READINGS_SLOT_S / 2) / READINGS_SLOT_S;
@@ -101,7 +103,7 @@ static void average(uint32_t now, int16_t t, uint16_t rh)
         if (s_n > 0) {
             readings_store_put_indoor(s_slot * READINGS_SLOT_S, (int16_t)mean(s_sum_t, s_n),
                                       (uint16_t)mean(s_sum_rh, s_n));
-            readings_store_flush();
+            readings_store_flush_due();
         }
         s_slot = slot;
         s_sum_t = s_sum_rh = s_n = 0;
