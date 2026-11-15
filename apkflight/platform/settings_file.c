@@ -13,7 +13,7 @@
 
 #define SETTINGS_PATH "/assets/settings.bin"
 #define SETTINGS_MAGIC 0x414B4631u   /* "AKF1" */
-#define SETTINGS_VER   6
+#define SETTINGS_VER   7
 
 static settings_t s_settings;
 
@@ -43,6 +43,7 @@ static void set_defaults(void)
     s_settings.fa_limit = FA_DEFAULT_MONTHLY;
     s_settings.amb_from_min = 22 * 60;
     s_settings.amb_to_min = 7 * 60;
+    s_settings.cycle_s = 6;
 }
 
 void settings_load(void)
@@ -59,6 +60,14 @@ void settings_load(void)
         settings_t tmp;
         if (ver == SETTINGS_VER && fread(&tmp, sizeof(tmp), 1, f) == 1) {
             s_settings = tmp;
+        } else if (ver == 6) {
+            /* v6 = 0.4.7 layout, a prefix up to the auto-cycle fields. Its
+             * file is that prefix plus the struct's tail padding, which may
+             * be where cycle_s lands now: only the prefix is taken. */
+            size_t v6 = offsetof(settings_t, cycle_s);
+            if (fread(&tmp, 1, sizeof(tmp), f) >= v6) {
+                memcpy(&s_settings, &tmp, v6);
+            }
         } else if (ver == 5) {
             /* v5 = 0.4.6 layout, a prefix up to the 0.4.7 fields. Earlier
              * v5 files (0.4.5) have another size and keep the defaults. */

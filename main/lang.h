@@ -62,6 +62,7 @@ typedef struct {
     const char *units_lbl, *units_opts;          /* aviation vs metric */
     const char *metar_lbl, *metar_opts;          /* raw vs decoded */
     const char *follow_lbl;                      /* stick to selected flight */
+    const char *cycle_every_lbl, *cycle_routed_lbl;   /* auto-cycle interval, route-only */
     const char *mtr_wind, *mtr_gust, *mtr_calm, *mtr_vis, *mtr_cavok;
     const char *wifi_no_ap, *wifi_badpass;
     const char *night_auto_lbl;

@@ -54,6 +54,7 @@ static lv_obj_t *s_ta_carto, *s_ta_tileurl;
 static lv_obj_t *s_sw_route;
 static lv_obj_t *s_slider_bright, *s_sw_clk12, *s_sw_brightctl;
 static lv_obj_t *s_dd_units, *s_dd_metar, *s_sw_cycle, *s_sw_nauto;
+static lv_obj_t *s_slider_cycle, *s_cycle_label, *s_sw_cycle_rt;
 static lv_obj_t *s_dd_amb_style;
 static lv_obj_t *s_sw_map_light;
 static lv_obj_t *s_sw_ladsb;
@@ -262,6 +263,11 @@ static void radius_cb(lv_event_t *e)
     lv_label_set_text(s_radius_label, buf);
 }
 
+static void cycle_cb(lv_event_t *e)
+{
+    lv_label_set_text_fmt(s_cycle_label, "%d s", (int)lv_slider_get_value(s_slider_cycle));
+}
+
 static void ota_unlock_cb(lv_event_t *e)
 {
     settings_get()->ota_enabled =
@@ -376,6 +382,8 @@ static void save_cb(lv_event_t *e)
     }
     cfg->metar_decoded = lv_dropdown_get_selected(s_dd_metar) == 1;
     cfg->follow_mode = !lv_obj_has_state(s_sw_cycle, LV_STATE_CHECKED);
+    cfg->cycle_s = (uint8_t)lv_slider_get_value(s_slider_cycle);
+    cfg->cycle_routed = lv_obj_has_state(s_sw_cycle_rt, LV_STATE_CHECKED);
     cfg->night_auto = lv_obj_has_state(s_sw_nauto, LV_STATE_CHECKED);
     strlcpy(cfg->watch_regs, lv_textarea_get_text(s_ta_watch), sizeof(cfg->watch_regs));
     strlcpy(cfg->ntfy_topic, lv_textarea_get_text(s_ta_ntfy), sizeof(cfg->ntfy_topic));
@@ -775,32 +783,48 @@ void ui_settings_open(void)
     s_sw_nauto = add_switch(p, L()->night_auto_lbl, 0, 306, cfg->night_auto);
     s_sw_cycle = add_switch(p, L()->follow_lbl, 0, 358, !cfg->follow_mode);
     s_sw_pin_near = add_switch(p, L()->pin_near_lbl, 380, 358, cfg->pin_nearest);
-    add_label(p, L()->amb_idle_lbl, 0, 416);
+    /* auto-cycle interval and route-only switch: their own rows under the
+     * auto-cycle switch, the slider starting at the switch column
+     * (everything below moved 112) */
+    add_label(p, L()->cycle_every_lbl, 0, 416);
+    s_slider_cycle = lv_slider_create(p);
+    lv_obj_set_size(s_slider_cycle, UISX(340), UISY(16));
+    lv_obj_set_pos(s_slider_cycle, UISX(290), UISY(428));
+    lv_slider_set_range(s_slider_cycle, 6, 60);
+    lv_slider_set_value(s_slider_cycle,
+                        cfg->cycle_s >= 6 && cfg->cycle_s <= 60 ? cfg->cycle_s : 6,
+                        LV_ANIM_OFF);
+    lv_obj_add_event_cb(s_slider_cycle, cycle_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    s_cycle_label = add_label(p, "", 650, 416);
+    lv_obj_set_style_text_color(s_cycle_label, COL_TEXT, 0);
+    lv_label_set_text_fmt(s_cycle_label, "%d s", (int)lv_slider_get_value(s_slider_cycle));
+    s_sw_cycle_rt = add_switch(p, L()->cycle_routed_lbl, 0, 472, cfg->cycle_routed);
+    add_label(p, L()->amb_idle_lbl, 0, 528);
     snprintf(buf, sizeof(buf), "%d", cfg->ambient_idle_min);
-    s_ta_amb_idle = add_textarea(p, 630, 410, 110, buf, false);
-    add_label(p, L()->amb_style_lbl, 0, 472);
-    s_dd_amb_style = add_dropdown(p, 520, 466, 220, NULL);
+    s_ta_amb_idle = add_textarea(p, 630, 522, 110, buf, false);
+    add_label(p, L()->amb_style_lbl, 0, 584);
+    s_dd_amb_style = add_dropdown(p, 520, 578, 220, NULL);
     lv_dropdown_set_options(s_dd_amb_style, L()->amb_style_opts);
     lv_dropdown_set_selected(s_dd_amb_style, cfg->amb_style == 1 ? 1 : 0);
-    s_sw_amb_sched = add_switch(p, L()->amb_sched_lbl, 0, 530, cfg->amb_sched);
-    add_label(p, L()->night_from, 380, 518);
+    s_sw_amb_sched = add_switch(p, L()->amb_sched_lbl, 0, 642, cfg->amb_sched);
+    add_label(p, L()->night_from, 380, 630);
     snprintf(buf, sizeof(buf), "%02d:%02d", cfg->amb_from_min / 60, cfg->amb_from_min % 60);
-    s_ta_amb_from = add_textarea(p, 380, 542, 110, buf, false);
-    add_label(p, L()->night_to, 510, 518);
+    s_ta_amb_from = add_textarea(p, 380, 654, 110, buf, false);
+    add_label(p, L()->night_to, 510, 630);
     snprintf(buf, sizeof(buf), "%02d:%02d", cfg->amb_to_min / 60, cfg->amb_to_min % 60);
-    s_ta_amb_to = add_textarea(p, 510, 542, 110, buf, false);
-    s_sw_map_light = add_switch(p, L()->map_light_lbl, 0, 596, cfg->map_light);
-    s_sw_retro_map = add_switch(p, L()->retro_map_lbl, 380, 596, cfg->retro_map);
-    s_sw_clk12 = add_switch(p, L()->clk12_lbl, 0, 648, cfg->clock_12h);
+    s_ta_amb_to = add_textarea(p, 510, 654, 110, buf, false);
+    s_sw_map_light = add_switch(p, L()->map_light_lbl, 0, 708, cfg->map_light);
+    s_sw_retro_map = add_switch(p, L()->retro_map_lbl, 380, 708, cfg->retro_map);
+    s_sw_clk12 = add_switch(p, L()->clk12_lbl, 0, 760, cfg->clock_12h);
     s_slider_bright = NULL;
     s_sw_brightctl = NULL;
 #ifndef APKFLIGHT
     if (waveshare_rgb_lcd_bl_dimmable()) {
-        s_sw_brightctl = add_switch(p, L()->brightctl_lbl, 380, 642, cfg->brightness_ctl);
-        add_label(p, L()->bright_lbl, 380, 694);
+        s_sw_brightctl = add_switch(p, L()->brightctl_lbl, 380, 754, cfg->brightness_ctl);
+        add_label(p, L()->bright_lbl, 380, 806);
         s_slider_bright = lv_slider_create(p);
         lv_obj_set_size(s_slider_bright, UISX(280), UISY(16));
-        lv_obj_set_pos(s_slider_bright, UISX(460), UISY(706));
+        lv_obj_set_pos(s_slider_bright, UISX(460), UISY(818));
         lv_slider_set_range(s_slider_bright, 5, 100);
         lv_slider_set_value(s_slider_bright, cfg->brightness, LV_ANIM_OFF);
         lv_obj_add_event_cb(s_slider_bright, brightness_cb, LV_EVENT_VALUE_CHANGED, NULL);
@@ -809,18 +833,18 @@ void ui_settings_open(void)
 
 #ifdef APKFLIGHT
     /* No web panel and no OTA in the app - updates arrive as a new APK. */
-    int nety = 760;
+    int nety = 872;
 #else
-    add_section(p, L()->sec_webpanel, 760);
-    s_ta_webpass = add_textarea(p, 0, 792, 360, cfg->web_pass, false);
-    add_hint(p, L()->lbl_webpass, 0, 838, 360);
+    add_section(p, L()->sec_webpanel, 872);
+    s_ta_webpass = add_textarea(p, 0, 904, 360, cfg->web_pass, false);
+    add_hint(p, L()->lbl_webpass, 0, 950, 360);
 
-    add_section(p, L()->sec_updates, 872);
-    lv_obj_t *sw_ota = add_switch(p, L()->ota_unlock, 0, 904, cfg->ota_enabled);
+    add_section(p, L()->sec_updates, 984);
+    lv_obj_t *sw_ota = add_switch(p, L()->ota_unlock, 0, 1016, cfg->ota_enabled);
     lv_obj_add_event_cb(sw_ota, ota_unlock_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_t *hint = add_label(p, L()->ota_hint, 0, 950);
+    lv_obj_t *hint = add_label(p, L()->ota_hint, 0, 1062);
     lv_obj_set_style_text_font(hint, UIFONT(&font_pl_14, &font_pl_8), 0);
-    int nety = 998;
+    int nety = 1110;
 #endif
 
     char netbuf[120] = "";

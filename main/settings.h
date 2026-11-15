@@ -75,6 +75,9 @@ typedef struct {
     bool    local_merge;      /* local receiver plus internet aggregators */
     char    track_id[12];     /* flight to follow anywhere: callsign, reg or hex */
     bool    track_on;         /* track mode: the screen shows only that flight */
+    /* auto-cycle (app blob v7 reads a v6 file as the prefix up to cycle_s) */
+    uint8_t cycle_s;          /* auto-cycle interval, 6..60 s (0 from an old blob = 6) */
+    bool    cycle_routed;     /* auto-cycle skips flights without a known route */
 } settings_t;
 
 /* Load from NVS (menuconfig values as first-boot defaults). Call once at
