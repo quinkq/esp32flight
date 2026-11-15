@@ -43,6 +43,7 @@ static const char *TAG = "outdoor_link";
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "outdoor_health.h"
+#include "outdoor_ota.h"
 #include "readings_store.h"
 #include "ws_link.h"
 #include "ws_settings.h"
@@ -82,12 +83,16 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
 static void on_sent(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
     outdoor_health_reply_sent(status == ESP_NOW_SEND_SUCCESS);
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        outdoor_ota_offer_heard();     /* counts only if this reply carried the offer */
+    }
 }
 
+/* the clock, the interval and, while a firmware image waits, its offer */
 static void reply(uint16_t seq, uint16_t interval_s)
 {
     const time_t now = time(NULL);
-    const ws_link_reply_t r = {
+    ws_link_reply_t r = {
         .hdr = {
             .magic = WS_LINK_MAGIC,
             .version = WS_LINK_VERSION,
@@ -98,7 +103,8 @@ static void reply(uint16_t seq, uint16_t interval_s)
         .interval_s = interval_s,
         .cmd = WS_CMD_NONE,
     };
-    const esp_err_t err = esp_now_send(s_peer, (const uint8_t *)&r, WS_LINK_REPLY_SIZE);
+    const size_t len = outdoor_ota_offer(&r) ? WS_LINK_REPLY_OTA_SIZE : WS_LINK_REPLY_SIZE;
+    const esp_err_t err = esp_now_send(s_peer, (const uint8_t *)&r, len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "reply to seq %u not sent: %s", seq, esp_err_to_name(err));
     }
@@ -186,6 +192,8 @@ static void handle(const rx_item_t *item)
     const bool accept = have_time || (f.flags & WS_OUTDOOR_CLOCK_SYNCED);
     ws_settings_t cfg;
     ws_settings_get(&cfg);
+    /* first, so a frame from a new build already ends the offer in our reply */
+    outdoor_ota_frame(f.fw_build, (f.flags & WS_OUTDOOR_OTA_FAILED) != 0, f.reset_reason);
     if (accept) {
         reply(f.hdr.seq, cfg.interval_s);
     }
@@ -267,6 +275,9 @@ void outdoor_link_start(void)
         (err = esp_now_register_send_cb(on_sent)) != ESP_OK) {
         ESP_LOGE(TAG, "setup failed: %s; link off", esp_err_to_name(err));
         return;
+    }
+    if (!outdoor_ota_init()) {
+        ESP_LOGW(TAG, "no memory for outdoor unit updates; they stay off");
     }
     if (!outdoor_health_init(cfg.interval_s) ||
         xTaskCreateWithCaps(rx_task, "outdoor_link", TASK_STACK, NULL, TASK_PRIORITY, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {

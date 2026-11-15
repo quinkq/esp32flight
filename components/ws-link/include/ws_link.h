@@ -44,13 +44,20 @@ enum {
 #define WS_OUTDOOR_CLOCK_SYNCED    (1u << 0)  /* clock set by the display since power-on */
 #define WS_OUTDOOR_BACKLOG_DROPPED (1u << 1)  /* oldest unsent records were discarded */
 #define WS_OUTDOOR_LOW_BATTERY     (1u << 2)  /* reduced mode: radio every 4th wake */
-#define WS_OUTDOOR_OTA_FAILED      (1u << 3)  /* the last OTA attempt failed */
+#define WS_OUTDOOR_OTA_FAILED      (1u << 3)  /* gave up on the offered image: 3 attempts failed */
 
 /* ws_link_reply_t.cmd */
 enum {
     WS_CMD_NONE = 0,
     WS_CMD_OTA  = 1,
 };
+
+/* WS_CMD_OTA: the outdoor unit joins Wi-Fi and fetches the image over plain
+ * HTTP from http://<ota_ip>/outdoor/firmware.bin. The image is signed with
+ * our key and checked on the outdoor unit, the hash catches a broken
+ * transfer. At most 3 attempts per image, at least an hour apart. */
+#define WS_LINK_OTA_PATH           "/outdoor/firmware.bin"
+#define WS_LINK_OTA_MAX_SIZE       0x180000  /* the outdoor unit's app slot */
 
 typedef struct __attribute__((packed)) {
     uint16_t magic;            /* WS_LINK_MAGIC */

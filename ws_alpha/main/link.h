@@ -7,8 +7,10 @@
 #include "ws_link.h"
 
 /* Wi-Fi (client mode, never connected) and ESP-NOW with the display as
- * the encrypted peer, on the cached channel. */
-bool link_start(const config_pairing_t *pairing);
+ * the encrypted peer, on the cached channel. always_search: a wake that
+ * must reach the display (a new firmware's first) searches every time it
+ * misses, without the rationing. */
+bool link_start(const config_pairing_t *pairing, bool always_search);
 
 typedef enum {
     LINK_NOT_HEARD,            /* no acknowledgement: the display didn't get the frame */

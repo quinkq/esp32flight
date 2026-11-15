@@ -61,6 +61,52 @@ size_t outdoor_link_events(outdoor_event_t *out, size_t max);
  * the same log. Any task; serial log only while the link isn't running. */
 void outdoor_link_event(const char *kind, const char *text);
 
+/* A firmware image for the outdoor unit, uploaded on the weather station
+ * page and offered in the replies until the outdoor unit runs it
+ * (outdoor_ota.c). Kept in the display's spare app slot: it survives a
+ * display restart, a display update replaces it. */
+typedef enum {
+    OUTDOOR_OTA_NONE,                  /* nothing uploaded since the display started */
+    OUTDOOR_OTA_WAITING,               /* offered in every reply */
+    OUTDOOR_OTA_STARTED,               /* a frame from the new build came: not offered any more */
+    OUTDOOR_OTA_DONE,                  /* ... and one after a deep-sleep wake on it: it kept it */
+    OUTDOOR_OTA_FAILED,                /* see why */
+    OUTDOOR_OTA_CANCELLED,
+} outdoor_ota_state_t;
+
+typedef struct {
+    outdoor_ota_state_t state;
+    int64_t  changed_us;               /* esp_timer_get_time() of the last state change */
+    uint16_t build;                    /* the image's build number */
+    uint16_t from_build;               /* the outdoor unit's when it was uploaded; 0: not heard yet */
+    uint32_t size;
+    uint16_t offers_heard;             /* replies with the offer its radio acknowledged */
+    uint16_t downloads, downloads_complete;
+    char     why[160];                 /* FAILED: why */
+} outdoor_ota_info_t;
+
+/* The upload, from the web server: begin with the size, write the pieces
+ * in order, end. Each returns NULL to go on, or why not (then it's over).
+ * end() checks the image (ESP32-C3, ws_alpha, signed, a new build number)
+ * and offers it from the next frame on; a new upload replaces a waiting one.
+ * Refused while the display itself is on probation after its own update:
+ * the spare slot is its way back then. */
+const char *outdoor_ota_begin(size_t size);
+const char *outdoor_ota_write(const void *data, size_t len);
+const char *outdoor_ota_end(void);
+void outdoor_ota_abort(void);          /* an upload that broke off */
+
+/* Stop offering a waiting image; false if none waited. */
+bool outdoor_ota_cancel(void);
+
+void outdoor_ota_info(outdoor_ota_info_t *out);
+
+/* The outdoor unit's download, from the web server: begin (false unless an
+ * image waits), read pieces by offset, end (complete or not, bytes sent). */
+bool outdoor_ota_download_begin(uint32_t *size);
+size_t outdoor_ota_download_read(uint32_t offset, void *buf, size_t len);
+void outdoor_ota_download_end(bool complete, uint32_t sent);
+
 /* The event log, one event per line: unix time, kind, text, tab-separated.
  * Past 16 KB the file becomes the .old one, so read both, old first. */
 #define OUTDOOR_LOG_PATH     "/assets/outdoor.tsv"

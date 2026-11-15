@@ -10,6 +10,10 @@
  * backlog; the radio sends the backlog, oldest first, and a record leaves it
  * only once the display has confirmed it. A wake without an answer costs
  * nothing but time: the next one sends the same records again.
+ *
+ * Updates (ota.c): a reply may offer a new firmware, fetched after the
+ * exchange. The new firmware's first wake must reach the display: it keeps
+ * trying for up to 30 s, then goes back to the previous firmware.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +26,11 @@
 #include "backlog.h"
 #include "battery.h"
 #include "config.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_timer.h"
 #include "link.h"
+#include "ota.h"
 #include "power.h"
 #include "sensors.h"
 #include "ws_link.h"
@@ -31,6 +39,9 @@ static const char *TAG = "ws_alpha";
 
 #define LOW_BATTERY_EVERY  4           /* radio on every n-th wake below 3.4 V */
 #define CLOCK_VALID_FROM   1767225600u /* 2026-01-01: earlier means the display has no time yet */
+#define PROBATION_MS       30000       /* a new firmware's first wake: this long to reach the display */
+#define PROBATION_CAP_MS   40000
+#define RETRY_MS           2000        /* between its tries */
 
 /* a counter needs no init: any start value works, also after a power-on */
 static RTC_NOINIT_ATTR uint16_t s_seq;
@@ -93,6 +104,9 @@ static size_t build_frame(uint8_t *buf, uint16_t seq, battery_mode_t mode, uint1
     if (mode == BATTERY_LOW) {
         flags |= WS_OUTDOOR_LOW_BATTERY;
     }
+    if (ota_gave_up()) {
+        flags |= WS_OUTDOOR_OTA_FAILED;
+    }
 
     f->hdr.magic = WS_LINK_MAGIC;
     f->hdr.version = WS_LINK_VERSION;
@@ -124,41 +138,49 @@ static void apply_reply(const ws_link_reply_t *r)
         }
     }
     power_set_interval(r->interval_s);
-    if (r->cmd == WS_CMD_OTA) {
-        ESP_LOGW(TAG, "display offers an update: not supported yet");
-    }
+    ota_note_reply(r);   /* an offered update runs after the exchange */
 }
 
-static void exchange(battery_mode_t mode)
+/* The backlog to the display. must_reach (a new firmware's first wake):
+ * keep trying for PROBATION_MS until a reply comes. Returns whether one did. */
+static bool exchange(battery_mode_t mode, bool must_reach)
 {
     config_pairing_t pairing;
     if (!config_init() || !config_load_pairing(&pairing)) {
         ESP_LOGW(TAG, "not paired: flash the secrets image (radio stays off)");
-        return;
+        return false;
     }
-    if (!link_start(&pairing)) {
+    if (!link_start(&pairing, must_reach)) {
         link_stop();
-        return;
+        return false;
     }
 
+    const int64_t until_us = must_reach ? esp_timer_get_time() + (int64_t)PROBATION_MS * 1000 : 0;
     uint16_t sent = 0, frames = 0;
-    while (backlog_count() > 0) {
-        uint8_t buf[WS_LINK_MAX_PAYLOAD];
-        uint16_t count;
-        const uint16_t seq = ++s_seq;
-        const size_t len = build_frame(buf, seq, mode, &count);
-        ws_link_reply_t reply;
-        const link_result_t res = link_transfer(buf, len, seq, &reply);
-        if (res != LINK_NOT_HEARD) {
-            power_frame_acked();   /* the display has this frame's counts */
+    for (;;) {
+        while (backlog_count() > 0) {
+            uint8_t buf[WS_LINK_MAX_PAYLOAD];
+            uint16_t count;
+            const uint16_t seq = ++s_seq;
+            const size_t len = build_frame(buf, seq, mode, &count);
+            ws_link_reply_t reply = { 0 };
+            const link_result_t res = link_transfer(buf, len, seq, &reply);
+            if (res != LINK_NOT_HEARD) {
+                power_frame_acked();   /* the display has this frame's counts */
+            }
+            if (res != LINK_REPLY) {
+                break;
+            }
+            backlog_drop(count);
+            apply_reply(&reply);
+            sent += count;
+            frames++;
         }
-        if (res != LINK_REPLY) {
+        if (frames > 0 || esp_timer_get_time() >= until_us) {
             break;
         }
-        backlog_drop(count);
-        apply_reply(&reply);
-        sent += count;
-        frames++;
+        ESP_LOGW(TAG, "new firmware: no answer from the display yet, trying again");
+        vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
     link_stop();
 
@@ -168,19 +190,25 @@ static void exchange(battery_mode_t mode)
     } else {
         ESP_LOGW(TAG, "display not reached, %u records waiting", backlog_count());
     }
+    return frames > 0;
 }
 
 void app_main(void)
 {
     /* ESP-IDF logs at WARN by default (sdkconfig.defaults); ours at INFO */
     static const char *const our_tags[] = {
-        "ws_alpha", "power", "battery", "sensors", "backlog", "config", "link",
+        "ws_alpha", "power", "battery", "sensors", "backlog", "config", "link", "ota",
     };
     for (size_t i = 0; i < sizeof(our_tags) / sizeof(our_tags[0]); i++) {
         esp_log_level_set(our_tags[i], ESP_LOG_INFO);
     }
 
     power_begin();
+    const bool probation = ota_on_probation();
+    if (probation) {
+        ESP_LOGW(TAG, "new firmware, first wake: it must reach the display within %d s", PROBATION_MS / 1000);
+        power_extend_cap(PROBATION_CAP_MS);
+    }
 
     const uint32_t now = (uint32_t)time(NULL);
     backlog_begin(now);
@@ -192,8 +220,12 @@ void app_main(void)
     backlog_push(&rec);
     log_record(&rec, mode);
 
-    if (radio_allowed(mode)) {
-        exchange(mode);
+    if (probation) {
+        /* the radio whatever the battery: without a reply it goes back */
+        ota_end_probation(exchange(mode, true));
+    } else if (radio_allowed(mode)) {
+        exchange(mode, false);
+        ota_run(rec.bat_mv);   /* returns unless an update restarts it */
     }
     power_sleep();
 }

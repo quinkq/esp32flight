@@ -2,10 +2,31 @@
 CONFIG_IDF_TARGET="esp32c3"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
-# Two 1.5 MB OTA slots, rollback on from the start (the OTA client comes later)
+# Two 1.5 MB OTA slots, rollback on (main/ota.c: a new firmware's first wake
+# decides, see BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP below)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Signed firmware: an update is accepted only with a valid signature from our
+# key, the same as the display's (RSA-3072). Without hardware secure boot, so
+# no eFuses are burned: it keeps foreign firmware out over the air, whoever
+# sends the offer. The key lives outside the repo (relative to this project
+# directory); the build stops without it. The first signed build goes on by
+# cable: an update is checked against the running firmware's key.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="../../secrets/firmware-signing-key.pem"
+
+# The update (HTTP client, signature check) runs in the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Never used here, so out of the image: a smaller image downloads faster,
+# i.e. less Wi-Fi time per update
+# CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS is not set
+# CONFIG_LWIP_IPV6 is not set
 
 # Short wakes: no image check after deep sleep, a quiet bootloader
 CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y

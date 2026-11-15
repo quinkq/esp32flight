@@ -51,6 +51,7 @@ static RTC_NOINIT_ATTR link_state_t s_state;
 
 static uint8_t s_peer[6];
 static bool s_on_channel;      /* the display acked on the current channel this wake */
+static bool s_always_search;   /* this wake must reach the display: no rationing */
 static int8_t s_last_rssi;
 static SemaphoreHandle_t s_sent;
 static volatile bool s_send_ok;
@@ -88,11 +89,12 @@ static void load_state(void)
     }
 }
 
-bool link_start(const config_pairing_t *pairing)
+bool link_start(const config_pairing_t *pairing, bool always_search)
 {
     load_state();
     memcpy(s_peer, pairing->peer_mac, sizeof(s_peer));
     s_on_channel = false;
+    s_always_search = always_search;
     s_sent = xSemaphoreCreateBinary();
     s_replies = xQueueCreate(4, sizeof(reply_item_t));
 
@@ -154,7 +156,7 @@ static void found(uint8_t ch)
 
 static bool search_allowed(void)
 {
-    if (s_state.failed_searches < SEARCH_FAILS_RATION) {
+    if (s_always_search || s_state.failed_searches < SEARCH_FAILS_RATION) {
         return true;
     }
     if (++s_state.skipped >= SEARCH_EVERY) {
