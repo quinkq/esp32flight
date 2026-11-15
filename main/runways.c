@@ -85,23 +85,20 @@ void runways_draw(uint16_t *fb, int w, int h, const tile_view_t *view)
     if (s_count < 0) {
         load();
     }
-    /* Cull with plain comparisons first. Projecting all ~4,200 runways
-     * worldwide (two soft-float log/tan/cos each on the S3) held CPU 0 past
-     * the 5 s task watchdog in the screensaver pre-render on the 7B. A
-     * runway is skipped only when both ends lie beyond the same edge. */
-    double la0, la1, lo0, lo1;
-    bool lon_ok = tilemap_view_bounds(view, &la0, &la1, &lo0, &lo1);
-    const float m = 0.1f;   /* margin, degrees */
-    const float fla0 = (float)la0 - m, fla1 = (float)la1 + m;
-    const float flo0 = (float)lo0 - m, flo1 = (float)lo1 + m;
+    /* Projecting all 4000+ runways cost enough on every radar and
+     * screensaver render to show up in task-watchdog backtraces (#35).
+     * Cull by the view's lat/lon box first (one inverse Mercator per
+     * edge, 0.5 degree margin), project only what can be visible. */
+    double world = 256.0 * (double)(1 << view->z);
+    double lon_w = view->px0 / world * 360.0 - 180.0;
+    double lon_e = (view->px0 + view->w) / world * 360.0 - 180.0;
+    double lat_n = atan(sinh(M_PI * (1.0 - 2.0 * view->py0 / world))) * 180.0 / M_PI;
+    double lat_s = atan(sinh(M_PI * (1.0 - 2.0 * (view->py0 + view->h) / world))) * 180.0 / M_PI;
+    bool lon_cull = lon_w >= -180.0 && lon_e <= 180.0;   /* skip near the antimeridian */
     for (int i = 0; i < s_count; i++) {
-        const runway_t *r = &s_rw[i];
-        if ((r->le_lat < fla0 && r->he_lat < fla0) ||
-            (r->le_lat > fla1 && r->he_lat > fla1)) {
-            continue;
-        }
-        if (lon_ok && ((r->le_lon < flo0 && r->he_lon < flo0) ||
-                       (r->le_lon > flo1 && r->he_lon > flo1))) {
+        float mlat = s_rw[i].le_lat, mlon = s_rw[i].le_lon;
+        if (mlat < lat_s - 0.5 || mlat > lat_n + 0.5 ||
+            (lon_cull && (mlon < lon_w - 0.5 || mlon > lon_e + 0.5))) {
             continue;
         }
         int x0, y0, x1, y1;
