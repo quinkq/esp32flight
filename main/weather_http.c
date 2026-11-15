@@ -50,6 +50,8 @@ static const char *TAG = "weather_http";
 
 #define PAGE_EVENTS 10
 
+static volatile bool s_server_up;   /* weather_http_register() has run */
+
 static const char OUTDOOR_HTML[] =
 "<!doctype html><html><head><meta charset='utf-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -802,4 +804,10 @@ void weather_http_register(httpd_handle_t server)
             ESP_LOGW(TAG, "%s not registered (max_uri_handlers too low?)", uris[i].uri);
         }
     }
+    s_server_up = true;
+}
+
+bool weather_http_server_up(void)
+{
+    return s_server_up;
 }

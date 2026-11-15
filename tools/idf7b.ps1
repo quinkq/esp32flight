@@ -14,7 +14,7 @@ try {
     # the venv's python directly: export.ps1 doesn't define idf.py globally
     & "$env:IDF_PYTHON_ENV_PATH\Scripts\python.exe" "$env:IDF_PATH\tools\idf.py" `
         -B build-7b `
-        -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.7b" `
+        -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.7b;sdkconfig.weather-station" `
         -D SDKCONFIG=build-7b/sdkconfig `
         @args
     $code = $LASTEXITCODE

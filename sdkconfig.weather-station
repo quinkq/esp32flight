@@ -1,0 +1,22 @@
+# weather-station fork: our additions to the 7B build, read after
+# sdkconfig.defaults and sdkconfig.board.7b (tools/idf7b.ps1 and the VS Code
+# settings list it). After a change here, delete build-7b/sdkconfig before
+# building, or the change is ignored.
+
+# Rollback: a new firmware starts on probation and has to confirm itself
+# (main/ota_guard.c), or the next restart goes back to the previous one. The
+# bootloader does the going back, so this needs our bootloader, flashed once
+# by cable (bootloader-flash); OTA never changes the bootloader.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Signed firmware: an OTA image is accepted only with a valid signature from
+# our key (RSA-3072, the S3's only scheme). Without hardware secure boot, so
+# no eFuses are burned: this keeps foreign firmware out over the network, not
+# from someone with a cable at the display.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+# The private key lives outside the repo, next to the clone (the path is
+# relative to the project directory). Without it the build stops.
+CONFIG_SECURE_BOOT_SIGNING_KEY="../secrets/display-signing-key.pem"

@@ -24,6 +24,7 @@
 #include "indoor.h"         /* weather-station fork: the indoor SHT40 */
 #include "ws_settings.h"    /* weather-station fork: its own settings */
 #include "altitude.h"       /* weather-station fork: for pressure at sea level */
+#include "ota_guard.h"      /* weather-station fork: signed updates, rollback */
 
 static const char *TAG = "canflight";
 
@@ -65,6 +66,7 @@ void app_main(void)
     }
     settings_load();
     ws_settings_init();     /* weather-station fork */
+    ota_guard_start();      /* weather-station fork: after settings_load() */
 
     ESP_ERROR_CHECK(waveshare_esp32_s3_rgb_lcd_init());
 
