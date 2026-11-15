@@ -332,6 +332,7 @@ static const lang_t k_hu = {
     .arr_fmt = "érkezés ~%s helyi idő",
     .hint_ladsb = "Saját dump1090/readsb vevő az internetes API-k helyett",
     .avg_word = "átl.", .best_word = "rekord",
+    .view_names = { "Részletek", "Térkép", "Radar", "Statisztika", "Retro radar" },
     .stats_title = "Munkamenet statisztika",
     .st_hourly = "ÚJ GÉPEK ÓRÁNKÉNT",
     .st_top_airlines = "TOP LÉGITÁRSASÁGOK",
