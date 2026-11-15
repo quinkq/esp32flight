@@ -67,6 +67,7 @@ idf_component_register(
         "indoor.c"
         "altitude.c"
         "calibration.c"
+        "ota_guard.c"
         "font_pl_8.c"
         "font_pl_10.c"
         "font_pl_12.c"
