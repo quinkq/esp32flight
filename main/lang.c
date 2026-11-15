@@ -312,6 +312,7 @@ static const lang_t k_hu = {
     .units_lbl = "Mértékegységek", .units_opts = "Repülési (ft, kt, °C)\nRepülési (ft, kt, °F)\nMetrikus (m, km/h, °C)",
     .metar_lbl = "METAR", .metar_opts = "Nyers\nÉrtelmezett",
     .follow_lbl = "Járatok automatikus váltása",
+    .cycle_every_lbl = "Váltási időköz", .cycle_routed_lbl = "Csak ismert útvonalú járatok",
     .mtr_wind = "szél", .mtr_gust = "széllökés", .mtr_calm = "szélcsend",
     .mtr_vis = "látás", .mtr_cavok = "látás >10 km, felhőtlen",
     .wifi_no_ap = "hálózat nem található - 2,4 GHz? hatótáv?",
