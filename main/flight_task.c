@@ -44,6 +44,7 @@
 #include "waveshare_rgb_lcd_port.h"
 #include "ui.h"
 #include "weather.h"
+#include "ui_weather_amb.h"   /* weather-station fork */
 #include "web_server.h"
 #include "wifi_mgr.h"
 #include "esp_app_desc.h"
@@ -986,6 +987,7 @@ static void flight_task(void *arg)
                          weather_icon_str(wx.code), (double)temp, fahr ? "F" : "C",
                          wx.wind_dir_deg >= 0 ? lang_compass(wx.wind_dir_deg) : "",
                          (double)wx.wind_kmh, lang_weather_desc(wx.code));
+                ui_weather_open_meteo(&wx, wbuf, sizeof(wbuf));   /* weather-station fork: our temperatures */
                 if (lvgl_port_lock(1000)) {
                     ui_set_weather(wbuf);
                     lvgl_port_unlock();
