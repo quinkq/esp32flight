@@ -4,6 +4,8 @@
 #  - font_ws_digits_100: the large numbers (screensaver clock and readouts,
 #    the weather view's current temperatures): digits, ". : - /" and the
 #    minus sign U+2212.
+#  - font_ws_digits_88: the screensaver's clock, digits and ":" only. At
+#    100 px the widest times ("00:00") reached ~30 px into the radar's ring.
 #  - font_ws_26: the screensaver's lines and the weather view's details:
 #    printable ASCII, the Polish letters, the degree sign and middle dot,
 #    LVGL's up/down arrows (trends), FontAwesome's weather icons and the
@@ -22,6 +24,10 @@ ICONS=61559,61560,0xf185,0xf6c4,0xf0c2,0xf75f,0xf73d,0xf740,0xf2dc,0xf0e7,0xf72e
 npx --yes lv_font_conv@1.5.3 --bpp 4 --size 100 \
     --font "$TTF" -r 0x20,0x2D-0x3A,0x2212 \
     --format lvgl --no-compress -o font_ws_digits_100.c
+
+npx --yes lv_font_conv@1.5.3 --bpp 4 --size 88 \
+    --font "$TTF" -r 0x20,0x30-0x3A \
+    --format lvgl --no-compress -o font_ws_digits_88.c
 
 npx --yes lv_font_conv@1.5.3 --bpp 4 --size 26 \
     --font "$TTF" -r 0x20-0x7E,"$PL" \

@@ -207,19 +207,7 @@ static int32_t floor_div(int32_t a, int32_t b)
     return a >= 0 ? a / b : -((-a + b - 1) / b);
 }
 
-/* outdoor temperature of a calibrated slot, tenths; false: none */
-static bool out_temp(const readings_slot_t *s, int32_t *t)
-{
-    if (s->flags & READINGS_SHT_OK) {
-        *t = s->sht_t / 10;
-        return true;
-    }
-    if (s->flags & READINGS_BME_OK) {   /* the backup */
-        *t = s->bme_t / 10;
-        return true;
-    }
-    return false;
-}
+#define out_temp ui_weather_out_temp   /* the SHT40, the BME280 as the backup (ui_weather_temp.c) */
 
 static void hm(char *buf, size_t n, time_t t)
 {
@@ -323,8 +311,9 @@ static void render_top(time_t now, const calibration_t *cal)
     }
     outdoor_health_t h;
     outdoor_link_health(&h);
-    const bool stale = !have || h.status == OUTDOOR_SILENT ||
-                       (h.status == OUTDOOR_NOT_HEARD && now - (time_t)latest.ts > 3 * (time_t)h.expected_gap_s);
+    ui_weather_now_t nw;
+    ui_weather_now(&nw);   /* the one rule for stale outdoor values */
+    const bool stale = nw.out_stale;
 
     top_t *g = heap_caps_calloc(1, sizeof(top_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (g == NULL) {
@@ -861,8 +850,8 @@ void ui_weather_view_build(lv_obj_t *scr, lv_coord_t x, lv_coord_t y, lv_coord_t
     lv_obj_set_width(s_v.status, in_card_x - UISX(12) - inset - out_det_x);
     lv_label_set_long_mode(s_v.status, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(s_v.status, out_det_x, UISY(14));
-    s_v.out_big = ui_temp_big_create(p);
-    lv_obj_set_pos(s_v.out_big, out_x, UISY(30));
+    s_v.out_big = ui_temp_big_create(p);   /* its box hugs the digits: they start at its top */
+    lv_obj_set_pos(s_v.out_big, out_x, UISY(43));
     for (int k = 0; k < 2; k++) {   /* humidity; pressure */
         s_v.out_det[k] = label(p, &font_ws_26, COL_TEXT);
         lv_obj_set_pos(s_v.out_det[k], out_det_x, UISY(44 + 40 * k));
@@ -876,7 +865,7 @@ void ui_weather_view_build(lv_obj_t *scr, lv_coord_t x, lv_coord_t y, lv_coord_t
     lv_label_set_text(s_v.in_cap, cap);
     lv_obj_set_pos(s_v.in_cap, in_x, UISY(8));
     s_v.in_big = ui_temp_big_create(p);
-    lv_obj_set_pos(s_v.in_big, in_x, UISY(30));
+    lv_obj_set_pos(s_v.in_big, in_x, UISY(43));
     s_v.in_det = label(p, &font_ws_26, COL_TEXT);
     lv_obj_set_pos(s_v.in_det, in_det_x, UISY(44));
     s_v.in_mm = label(p, &font_ws_26, COL_DIM);

@@ -36,6 +36,7 @@
 #include "ui_map.h"
 #include "ui_settings.h"
 #include "ui_weather_view.h"   /* weather-station fork: the weather view */
+#include "ui_weather_amb.h"    /* weather-station fork: the screensaver's and the header's weather */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -995,6 +996,7 @@ static void build_header(lv_obj_t *scr)
     lv_label_set_long_mode(s_weather_label, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_weather_label, LV_SYMBOL_GPS " esp32flight");
     lv_obj_align(s_weather_label, LV_ALIGN_LEFT_MID, wx_x, 0);
+    ui_weather_header_hook(s_weather_label);   /* weather-station fork */
 
     s_status_label = make_label(hdr, UIFONT(&font_pl_14, &font_pl_8), COL_DIM);
     lv_obj_set_width(s_status_label, UISX(HDR_STATUS_W));
@@ -3037,6 +3039,11 @@ static void amb_click_cb(lv_event_t *e)
     lv_point_t pt;
     if (indev != NULL) {
         lv_indev_get_point(indev, &pt);
+        if (ui_weather_amb_hit(&pt)) {   /* weather-station fork: a weather field opens the weather view */
+            amb_close();
+            ui_show_weather_view();
+            return;
+        }
         /* no sprites on screen (no tile projection) -> nothing to pick */
         bool pickable = s_amb_view_ok || !s_home_ok;
         int best = -1, best_d2 = 48 * 48;
@@ -3175,6 +3182,7 @@ static void amb_show(void)
     lv_obj_set_style_pad_all(s_amb_wx, UISY(6), 0);
     lv_obj_align(s_amb_wx, LV_ALIGN_TOP_RIGHT, -UISX(10), UISY(12));
     lv_label_set_text(s_amb_wx, s_weather_txt);
+    ui_weather_amb_build(s_amb, s_amb_clock, s_amb_wx, attr);   /* weather-station fork */
 
     /* home-area tiles for the whole screen */
     amb_spawn_tiles();
