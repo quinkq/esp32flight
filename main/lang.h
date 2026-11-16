@@ -71,7 +71,7 @@ typedef struct {
     const char *arr_fmt;         /* local arrival time, %s = HH:MM */
     const char *avg_word, *best_word;
     /* view menu, in ui.c VIEW_* order */
-    const char *view_names[5];
+    const char *view_names[6];   /* weather-station fork: 6th, the weather view */
     /* stats view */
     const char *stats_title;
     const char *st_hourly;

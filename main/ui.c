@@ -35,6 +35,7 @@
 #include "tz.h"
 #include "ui_map.h"
 #include "ui_settings.h"
+#include "ui_weather_view.h"   /* weather-station fork: the weather view */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -141,10 +142,12 @@ static bool view_shows_ships(void);
 #define VIEW_RADAR  2
 #define VIEW_STATS  3
 #define VIEW_RETRO  4
-#define VIEW_COUNT  5
+#define VIEW_WEATHER 5   /* weather-station fork: ui_weather_view.c */
+#define VIEW_COUNT  6
 /* view menu icons, one per VIEW_* (the glyphs the old cycle button used) */
 static const char *const k_view_icon[VIEW_COUNT] = {
     LV_SYMBOL_LIST, LV_SYMBOL_LOOP, LV_SYMBOL_GPS, LV_SYMBOL_BARS, LV_SYMBOL_EYE_OPEN,
+    "\xEF\x9B\x84",   /* weather-station fork: cloud and sun (f6c4, in font_pl_*) */
 };
 _Static_assert(sizeof(((lang_t *)0)->view_names) / sizeof(((lang_t *)0)->view_names[0]) == VIEW_COUNT,
                "lang_t.view_names must name every view");
@@ -397,6 +400,8 @@ static void render_right(void)
         break;
     case VIEW_RETRO:
         render_retro_panel();
+        break;
+    case VIEW_WEATHER:   /* weather-station fork: refreshes itself */
         break;
     default:
         render_detail();
@@ -710,6 +715,7 @@ static void apply_view(int mode)
     lv_obj_add_flag(s_radar_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_stats_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_retro_panel, LV_OBJ_FLAG_HIDDEN);
+    ui_weather_view_show(false);   /* weather-station fork */
     if (s_retro_timer != NULL && (s_amb == NULL || !s_amb_retro)) {
         lv_timer_pause(s_retro_timer);   /* resumed below when retro shows */
     }
@@ -734,6 +740,10 @@ static void apply_view(int mode)
         if (s_retro_timer != NULL) {
             lv_timer_resume(s_retro_timer);
         }
+        lv_timer_pause(s_cycle_timer);
+        break;
+    case VIEW_WEATHER:   /* weather-station fork */
+        ui_weather_view_show(true);
         lv_timer_pause(s_cycle_timer);
         break;
     default:
@@ -858,6 +868,13 @@ void ui_set_view(int mode)
         return;
     }
     apply_view(mode);
+}
+
+/* weather-station fork: ui_set_view(5) is a screenshot helper, so the
+ * weather view gets its own way in (taps on weather fields) */
+void ui_show_weather_view(void)
+{
+    apply_view(VIEW_WEATHER);
 }
 
 /* skip the realloc + invalidate when a cyclic update rewrites the same text */
@@ -4027,6 +4044,7 @@ void ui_init(void)
     build_radar_panel(scr);
     build_stats_panel(scr);
     build_retro_panel(scr);
+    ui_weather_view_build(scr, 0, HEADER_H, SCR_W, SCR_H - HEADER_H);   /* weather-station fork: over the list too */
 
     /* All big tile framebuffers are session-persistent once used, so they
      * are allocated HERE, while PSRAM is one unfragmented block. Lazy

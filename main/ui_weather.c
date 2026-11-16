@@ -9,8 +9,8 @@
  * override stay on the web page. At the bottom, how the readings stand in
  * flash. The overlay's top bar gets "Save weather data" next to upstream's
  * Save, renamed "Save settings": the readings into flash now (the store does
- * it hourly and before every restart), for switching the display off. Later
- * the weather view, the header text and the screensaver block.
+ * it hourly and before every restart), for switching the display off. The
+ * weather view itself is ui_weather_view.c.
  *
  * Labels follow the display's language (English, Polish). Event texts stay
  * English: they're written when the event happens, also into the log file;
