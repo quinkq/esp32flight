@@ -1,0 +1,21 @@
+# ws-pull's settings (installed as /etc/ws-pull/ws-pull.conf).
+# The next run reads them; there's nothing to restart.
+# The panel password doesn't go here but in /etc/ws-pull/password
+# (one line, only root can read it; empty = no password set on the display).
+
+[ws-pull]
+# The display: its fixed IP address (a DHCP reservation on the router),
+# or its mDNS name, which works where avahi runs (Linux Mint has it).
+url = http://esp32flight.local
+
+# Optional, with their defaults:
+# The web panel's user name (the display's is always admin)
+#user = admin
+# One request, in seconds
+#timeout_s = 60
+# A bigger answer is refused (all of the display's 2,210 slots are ~0.5 MB)
+#max_bytes = 8388608
+# Tries when the display doesn't answer, and the wait between them in seconds
+#attempts = 3
+#retry_wait_s = 30
+#state_dir = /var/lib/ws-pull
