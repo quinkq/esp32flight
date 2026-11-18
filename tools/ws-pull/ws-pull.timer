@@ -1,0 +1,14 @@
+# ws-pull: 5 minutes after boot and at every full hour. A full hour that
+# passed during suspend runs right after waking up.
+# Next runs: systemctl list-timers ws-pull.timer
+
+[Unit]
+Description=Weather station: copy the readings from the display every hour
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

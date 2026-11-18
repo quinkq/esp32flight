@@ -1,0 +1,55 @@
+# ws-pull: copies the weather station's readings from the display (README.md).
+# Started by ws-pull.timer; by hand: sudo systemctl start ws-pull
+# Sandbox check: systemd-analyze security ws-pull.service
+
+[Unit]
+Description=Weather station: copy the readings from the display
+Documentation=file:///opt/ws-pull/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ws-pull
+Group=ws-pull
+ExecStart=/usr/bin/python3 -I -B /opt/ws-pull/ws_pull.py --config /etc/ws-pull/ws-pull.conf
+# the panel password, root-only on disk; the service reads its own copy
+LoadCredential=password:/etc/ws-pull/password
+# /var/lib/ws-pull: the cursor; archive/ the CSV files (readable by the group, for a later copy)
+StateDirectory=ws-pull
+StateDirectoryMode=0750
+UMask=0027
+# 3 tries of up to 60 s, 30 s apart
+TimeoutStartSec=5min
+MemoryMax=256M
+Nice=10
+
+# Sandbox: it may write only its state folder, and reach only private addresses
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+IPAddressDeny=any
+IPAddressAllow=localhost link-local 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
