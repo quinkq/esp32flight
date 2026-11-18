@@ -8,11 +8,12 @@
 #include "lvgl.h"
 #include "weather.h"
 
-/* The screensaver (map style) was just built: its clock, Open-Meteo label
- * and map credit are upstream's; ours go on top. LVGL lock held. */
-void ui_weather_amb_build(lv_obj_t *amb, lv_obj_t *clock, lv_obj_t *wx, lv_obj_t *attr);
+/* The screensaver (map style) was just built: its clock, Open-Meteo label,
+ * map credit and radar ring are upstream's; ours go on top. LVGL lock held. */
+void ui_weather_amb_build(lv_obj_t *amb, lv_obj_t *clock, lv_obj_t *wx, lv_obj_t *attr, lv_obj_t *ring);
 
-/* A tap on the screensaver at pt: true if it hit a weather field (the
+/* A tap on the screensaver at pt that upstream didn't take for a plane:
+ * true if it hit a weather field or lies outside the radar's ring (the
  * caller closes the screensaver and opens the weather view). */
 bool ui_weather_amb_hit(const lv_point_t *pt);
 

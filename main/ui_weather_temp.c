@@ -7,8 +7,9 @@
  *    points, so 0 °C is whitish and 20 °C amber rather than a straight
  *    bridge from violet to red. The cold end is a medium violet and indigo,
  *    readable on the dark themes; on a light theme every colour is darkened.
- *  - The large temperature: the whole degrees in font_ws_digits_100, the
- *    decimal and the degree sign in Montserrat 44, both on one baseline, as
+ *  - The large temperature: the whole degrees in large digits (100 px in the
+ *    weather view, 110 on the screensaver), the decimal and the degree sign
+ *    in Montserrat 44, both on one baseline, as
  *    on the screensaver mockup (docs\mockups\screensaver-2026-11-16.png). Its
  *    box hugs the digits: the labels sit higher than the box by the empty
  *    space above the digits in the font's line, and draw outside it.
@@ -93,14 +94,14 @@ static lv_coord_t text_w(const char *text, const lv_font_t *font)
     return size.x;
 }
 
-lv_obj_t *ui_temp_big_create(lv_obj_t *parent)
+lv_obj_t *ui_temp_big_create(lv_obj_t *parent, const lv_font_t *digits)
 {
     lv_obj_t *big = lv_obj_create(parent);
     lv_obj_remove_style_all(big);
     lv_obj_add_flag(big, LV_OBJ_FLAG_OVERFLOW_VISIBLE);   /* the labels' empty line space sticks out */
     lv_obj_clear_flag(big, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *whole = lv_label_create(big);
-    lv_obj_set_style_text_font(whole, &font_ws_digits_100, 0);
+    lv_obj_set_style_text_font(whole, digits, 0);
     lv_label_set_text(whole, "");
     lv_obj_t *rest = lv_label_create(big);
     lv_obj_set_style_text_font(rest, &lv_font_montserrat_44, 0);
@@ -123,7 +124,7 @@ void ui_temp_big_set(lv_obj_t *big, bool have, int32_t tenths, lv_color_t colour
     lv_obj_set_style_text_color(rest, colour, 0);
     /* one baseline (each font's sits line_height - base_line below its
        label's top), and the box from the digits' top to the baseline */
-    const lv_font_t *fw = &font_ws_digits_100, *fr = &lv_font_montserrat_44;
+    const lv_font_t *fw = lv_obj_get_style_text_font(whole, 0), *fr = &lv_font_montserrat_44;
     lv_coord_t top, height;
     ui_digits_metrics(fw, &top, &height);
     const lv_coord_t ww = text_w(w, fw);

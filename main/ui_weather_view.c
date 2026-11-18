@@ -850,7 +850,7 @@ void ui_weather_view_build(lv_obj_t *scr, lv_coord_t x, lv_coord_t y, lv_coord_t
     lv_obj_set_width(s_v.status, in_card_x - UISX(12) - inset - out_det_x);
     lv_label_set_long_mode(s_v.status, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(s_v.status, out_det_x, UISY(14));
-    s_v.out_big = ui_temp_big_create(p);   /* its box hugs the digits: they start at its top */
+    s_v.out_big = ui_temp_big_create(p, &font_ws_digits_100);   /* its box hugs the digits: they start at its top */
     lv_obj_set_pos(s_v.out_big, out_x, UISY(43));
     for (int k = 0; k < 2; k++) {   /* humidity; pressure */
         s_v.out_det[k] = label(p, &font_ws_26, COL_TEXT);
@@ -864,7 +864,7 @@ void ui_weather_view_build(lv_obj_t *scr, lv_coord_t x, lv_coord_t y, lv_coord_t
     snprintf(cap, sizeof(cap), "%s  %s", k_place_icon[IN], str->where[IN]);
     lv_label_set_text(s_v.in_cap, cap);
     lv_obj_set_pos(s_v.in_cap, in_x, UISY(8));
-    s_v.in_big = ui_temp_big_create(p);
+    s_v.in_big = ui_temp_big_create(p, &font_ws_digits_100);
     lv_obj_set_pos(s_v.in_big, in_x, UISY(43));
     s_v.in_det = label(p, &font_ws_26, COL_TEXT);
     lv_obj_set_pos(s_v.in_det, in_det_x, UISY(44));
