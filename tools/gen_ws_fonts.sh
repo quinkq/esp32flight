@@ -1,11 +1,13 @@
 #!/bin/sh
 # weather-station fork: the weather station's own fonts, made like
 # upstream's (tools/gen_fonts.sh): Montserrat Medium, lv_font_conv 1.5.3.
-#  - font_ws_digits_100: the large numbers (screensaver clock and readouts,
-#    the weather view's current temperatures): digits, ". : - /" and the
-#    minus sign U+2212.
-#  - font_ws_digits_88: the screensaver's clock, digits and ":" only. At
-#    100 px the widest times ("00:00") reached ~30 px into the radar's ring.
+#  - font_ws_digits_100: the weather view's current temperatures: digits,
+#    ". : - /" and the minus sign U+2212.
+#  - font_ws_digits_110: the screensaver's temperatures, the same glyphs. The
+#    outdoor one reaches the radar's ring from about -10 °C (accepted).
+#  - font_ws_digits_94: the screensaver's clock, digits and ":" only. It
+#    reaches the ring at ~9 % of the day's minutes (wide times like "00:00",
+#    the user's choice 2026-11-18; 88 px never did, 100 px at 38 %).
 #  - font_ws_26: the screensaver's lines and the weather view's details:
 #    printable ASCII, the Polish letters, the degree sign and middle dot,
 #    LVGL's up/down arrows (trends), FontAwesome's weather icons and the
@@ -25,9 +27,13 @@ npx --yes lv_font_conv@1.5.3 --bpp 4 --size 100 \
     --font "$TTF" -r 0x20,0x2D-0x3A,0x2212 \
     --format lvgl --no-compress -o font_ws_digits_100.c
 
-npx --yes lv_font_conv@1.5.3 --bpp 4 --size 88 \
+npx --yes lv_font_conv@1.5.3 --bpp 4 --size 110 \
+    --font "$TTF" -r 0x20,0x2D-0x3A,0x2212 \
+    --format lvgl --no-compress -o font_ws_digits_110.c
+
+npx --yes lv_font_conv@1.5.3 --bpp 4 --size 94 \
     --font "$TTF" -r 0x20,0x30-0x3A \
-    --format lvgl --no-compress -o font_ws_digits_88.c
+    --format lvgl --no-compress -o font_ws_digits_94.c
 
 npx --yes lv_font_conv@1.5.3 --bpp 4 --size 26 \
     --font "$TTF" -r 0x20-0x7E,"$PL" \

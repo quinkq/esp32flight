@@ -3039,11 +3039,6 @@ static void amb_click_cb(lv_event_t *e)
     lv_point_t pt;
     if (indev != NULL) {
         lv_indev_get_point(indev, &pt);
-        if (ui_weather_amb_hit(&pt)) {   /* weather-station fork: a weather field opens the weather view */
-            amb_close();
-            ui_show_weather_view();
-            return;
-        }
         /* no sprites on screen (no tile projection) -> nothing to pick */
         bool pickable = s_amb_view_ok || !s_home_ok;
         int best = -1, best_d2 = 48 * 48;
@@ -3065,6 +3060,13 @@ static void amb_click_cb(lv_event_t *e)
         if (s_amb_sel_hex[0]) {     /* deselect first, close on next tap */
             s_amb_sel_hex[0] = '\0';
             render_ambient();
+            return;
+        }
+        /* weather-station fork: a weather field or outside the radar's ring
+           opens the weather view; inside it, closing shows the page that was open */
+        if (ui_weather_amb_hit(&pt)) {
+            amb_close();
+            ui_show_weather_view();
             return;
         }
     }
@@ -3182,7 +3184,7 @@ static void amb_show(void)
     lv_obj_set_style_pad_all(s_amb_wx, UISY(6), 0);
     lv_obj_align(s_amb_wx, LV_ALIGN_TOP_RIGHT, -UISX(10), UISY(12));
     lv_label_set_text(s_amb_wx, s_weather_txt);
-    ui_weather_amb_build(s_amb, s_amb_clock, s_amb_wx, attr);   /* weather-station fork */
+    ui_weather_amb_build(s_amb, s_amb_clock, s_amb_wx, attr, s_amb_ring);   /* weather-station fork */
 
     /* home-area tiles for the whole screen */
     amb_spawn_tiles();

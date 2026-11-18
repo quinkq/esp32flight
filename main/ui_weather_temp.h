@@ -9,9 +9,11 @@
 #include "lvgl.h"
 #include "readings_store.h"
 
-/* our fonts, made by tools/gen_ws_fonts.sh */
+/* our fonts, made by tools/gen_ws_fonts.sh: the weather view's temperatures,
+ * the screensaver's temperatures and clock, the lines */
 LV_FONT_DECLARE(font_ws_digits_100);
-LV_FONT_DECLARE(font_ws_digits_88);
+LV_FONT_DECLARE(font_ws_digits_110);
+LV_FONT_DECLARE(font_ws_digits_94);
 LV_FONT_DECLARE(font_ws_26);
 
 /* The colour of a temperature in tenths of °C: violet at -50 °C, whitish at
@@ -22,11 +24,11 @@ lv_color_t ui_temp_colour(int32_t tenths);
 /* "#rrggbb" of that colour, for label recolouring */
 void ui_temp_colour_code(char *buf, size_t n, int32_t tenths);
 
-/* A large temperature: the whole degrees in the 100 px digits, the decimal,
- * the degree sign and an optional suffix (a trend arrow) in Montserrat 44,
- * on one baseline. Its box hugs the digits (no empty line space above or
- * below them), so a frame around it sits tight. */
-lv_obj_t *ui_temp_big_create(lv_obj_t *parent);
+/* A large temperature: the whole degrees in digits (font_ws_digits_100 or
+ * _110), the decimal, the degree sign and an optional suffix (a trend
+ * arrow) in Montserrat 44, on one baseline. Its box hugs the digits (no
+ * empty line space above or below them), so a frame around it sits tight. */
+lv_obj_t *ui_temp_big_create(lv_obj_t *parent, const lv_font_t *digits);
 
 /* have false: a dash. suffix may be NULL. */
 void ui_temp_big_set(lv_obj_t *big, bool have, int32_t tenths, lv_color_t colour, const char *suffix);

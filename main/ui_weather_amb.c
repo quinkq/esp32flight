@@ -5,24 +5,29 @@
  *
  * The screensaver (map style; upstream builds it, ui_weather_amb_build()
  * adds ours on top, in boxes like upstream's labels):
- *  - top left: the clock in 88 px digits (font_ws_digits_88; "AM"/"PM" from
+ *  - top left: the clock in 94 px digits (font_ws_digits_94; "AM"/"PM" from
  *    Montserrat 44 as its fallback), the date under it. Upstream's clock
  *    label stays, hidden: ours copies its text, so the time source is the
- *    same. 88 px, not 100: the widest times ("00:00") reached the ring.
- *  - bottom left, outdoor; bottom right, indoor: the large temperature
- *    (ui_weather_temp.c, the colour scale) and under it the place's icon,
- *    name and humidity. Outdoor grey with "no data" when stale; indoor
- *    hidden while its sensor is switched off.
+ *    same. 94 px reaches the ring at ~9 % of the day's minutes (wide times
+ *    like "00:00"; the user's choice, 2026-11-18).
+ *  - bottom left, outdoor; bottom right, indoor: the large temperature in
+ *    110 px digits (ui_weather_temp.c, the colour scale) and under it the
+ *    place's icon, name and humidity. Outdoor grey with "no data" when
+ *    stale; indoor hidden while its sensor is switched off. The outdoor one
+ *    reaches the ring from about -10 °C (accepted).
  *  - top right: Open-Meteo without its temperature (our sensors measure
  *    that): its icon and words, the wind under them. Upstream's label for
  *    it stays, hidden.
  *  - the map credit moves to the bottom centre.
- *  - a tap on a weather field opens the weather view (the check sits in
- *    upstream's tap handler; ours aren't clickable, so its first tap still
- *    only wakes a dark screen).
- *  Sizes as measured on the mockup: the ring spans the screen's height
- *  (centre 512,300, radius ~306); the clock clears it even at "00:00", the
- *  outdoor readout down to about -18 °C.
+ *  - taps (the user, 2026-11-18): on a weather field or anywhere outside the
+ *    radar's ring, the weather view; inside the ring as upstream has it: a
+ *    plane is picked, empty map closes the screensaver onto the page that
+ *    was open (the weather view too). The check sits in upstream's tap
+ *    handler after its plane handling; ours aren't clickable, so its first
+ *    tap still only wakes a dark screen. The ring's place comes from
+ *    upstream's ring object.
+ *  Sizes as measured on the mockups (docs\mockups\): the ring spans the
+ *  screen's height (centre 512,300, radius ~306).
  *
  * The header: our outdoor / indoor temperatures in the scale's colours, with
  * Open-Meteo's icon, wind and words; Open-Meteo's own temperature, marked
@@ -89,6 +94,7 @@ static const strings_t *S(void)
 /* the screensaver's objects; all NULL while it's closed */
 static struct {
     lv_obj_t *up_clock;                    /* upstream's, hidden: the time we show */
+    lv_obj_t *ring;                        /* upstream's radar ring: inside it, taps stay upstream's */
     lv_obj_t *clock_box, *clock, *date;
     lv_obj_t *num_box[2], *big[2], *line[2];   /* outdoor, indoor */
     lv_obj_t *wx[2];                       /* Open-Meteo: words, wind */
@@ -96,7 +102,7 @@ static struct {
     int ticks;
 } s_a;
 
-static lv_font_t s_clock_font;             /* font_ws_digits_88 with a fallback for "AM"/"PM" */
+static lv_font_t s_clock_font;             /* font_ws_digits_94 with a fallback for "AM"/"PM" */
 
 static struct {
     lv_obj_t *label;
@@ -179,7 +185,7 @@ static void clock_update(void)
     }
     lv_label_set_text(s_a.clock, t);
     lv_coord_t top, height;
-    ui_digits_metrics(&font_ws_digits_88, &top, &height);
+    ui_digits_metrics(&font_ws_digits_94, &top, &height);
     lv_obj_set_pos(s_a.clock, PAD, PAD - top);
     lv_obj_set_size(s_a.clock_box, text_w(t, &s_clock_font) + 2 * PAD, height + 2 * PAD);
 
@@ -274,15 +280,16 @@ static void amb_deleted_cb(lv_event_t *e)
     memset(&s_a, 0, sizeof(s_a));
 }
 
-void ui_weather_amb_build(lv_obj_t *amb, lv_obj_t *clock, lv_obj_t *wx, lv_obj_t *attr)
+void ui_weather_amb_build(lv_obj_t *amb, lv_obj_t *clock, lv_obj_t *wx, lv_obj_t *attr, lv_obj_t *ring)
 {
     memset(&s_a, 0, sizeof(s_a));
     s_a.up_clock = clock;
+    s_a.ring = ring;
     lv_obj_add_flag(clock, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(wx, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(attr, LV_ALIGN_BOTTOM_MID, 0, -UISY(4));   /* the corners are ours now */
 
-    s_clock_font = font_ws_digits_88;
+    s_clock_font = font_ws_digits_94;
     s_clock_font.fallback = &lv_font_montserrat_44;
     s_a.clock_box = box(amb);
     lv_obj_set_pos(s_a.clock_box, MARGIN_X, MARGIN_Y);
@@ -294,7 +301,7 @@ void ui_weather_amb_build(lv_obj_t *amb, lv_obj_t *clock, lv_obj_t *wx, lv_obj_t
 
     for (int k = 0; k < 2; k++) {
         s_a.num_box[k] = box(amb);
-        s_a.big[k] = ui_temp_big_create(s_a.num_box[k]);
+        s_a.big[k] = ui_temp_big_create(s_a.num_box[k], &font_ws_digits_110);
         s_a.line[k] = line_box(amb, COL_GREY);
         s_a.wx[k] = line_box(amb, k == 0 ? COL_WHITE : COL_GREY);
     }
@@ -315,14 +322,30 @@ static bool hit(lv_obj_t *o, const lv_point_t *pt)
     return _lv_area_is_point_on(&a, pt, 0);
 }
 
+/* outside the radar's ring; false while upstream hides it (no map yet) */
+static bool outside_ring(const lv_point_t *pt)
+{
+    if (s_a.ring == NULL || lv_obj_has_flag(s_a.ring, LV_OBJ_FLAG_HIDDEN)) {
+        return false;
+    }
+    lv_area_t a;
+    lv_obj_get_coords(s_a.ring, &a);
+    const int32_t r = lv_area_get_width(&a) / 2;
+    const int32_t dx = pt->x - (a.x1 + r), dy = pt->y - (a.y1 + r);
+    return dx * dx + dy * dy > r * r;
+}
+
 bool ui_weather_amb_hit(const lv_point_t *pt)
 {
+    if (s_a.up_clock == NULL) {
+        return false;   /* not our screensaver (the retro style) */
+    }
     for (int k = 0; k < 2; k++) {
         if (hit(s_a.num_box[k], pt) || hit(s_a.line[k], pt) || hit(s_a.wx[k], pt)) {
             return true;
         }
     }
-    return false;
+    return outside_ring(pt);
 }
 
 /* ---- the header ---- */
